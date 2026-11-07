@@ -178,6 +178,37 @@ static double smooth_step(double edge0, double edge1, double value) {
 	return t * t * (3.0 - 2.0 * t);
 }
 
+static void draw_bird(SDL_Surface *surface, int x, int y, int size, int wing_lift) {
+	const Uint8 shade = 23, alpha = 185;
+	int body_length = size;
+	int wing_span = size;
+	if(wing_lift < 1) wing_lift = 1;
+
+	thickLineRGBA(surface, x - body_length / 2, y, x + body_length / 2, y,
+		2, shade, 30, 43, alpha);
+	filledCircleRGBA(surface, x + body_length / 2, y - 1, 1, shade, 30, 43, alpha);
+	thickLineRGBA(surface, x + body_length / 2 + 1, y - 1,
+		x + body_length / 2 + 3, y, 1, shade, 30, 43, alpha);
+	thickLineRGBA(surface, x - body_length / 2, y,
+		x - body_length / 2 - size / 2, y - size / 3, 1, shade, 30, 43, alpha);
+	thickLineRGBA(surface, x - body_length / 2, y,
+		x - body_length / 2 - size / 2, y + size / 3, 1, shade, 30, 43, alpha);
+
+	int shoulder_x = x - size / 5;
+	int far_tip_x = x - wing_span;
+	int near_tip_x = x - wing_span * 3 / 4;
+	int far_tip_y = y - wing_lift;
+	int near_tip_y = y + wing_lift * 3 / 4;
+	thickLineRGBA(surface, shoulder_x, y, x - size / 2, y - wing_lift / 2,
+		2, shade, 30, 43, alpha);
+	thickLineRGBA(surface, x - size / 2, y - wing_lift / 2,
+		far_tip_x, far_tip_y, 2, shade, 30, 43, alpha);
+	thickLineRGBA(surface, shoulder_x, y, x - size / 2, y + wing_lift / 3,
+		2, shade, 30, 43, alpha);
+	thickLineRGBA(surface, x - size / 2, y + wing_lift / 3,
+		near_tip_x, near_tip_y, 2, shade, 30, 43, alpha);
+}
+
 void render_backdrop(SDL_Surface *surface, Uint32 ticks) {
 	int scale = surface->h < surface->w ? surface->h : surface->w;
 	if(scale < 1) scale = 1;
@@ -305,23 +336,13 @@ void render_backdrop(SDL_Surface *surface, Uint32 ticks) {
 			% (surface->w + bird_span * 5) - bird_span * 2;
 		int group_y = surface->h * bird_group_y[group] / 100
 			+ (int)(sin(ticks / 1700.0 + group * 2.1) * scale * 0.008);
-		static const int formation_x[] = { 0, -3, -6 };
-		static const int formation_y[] = { 0, 3, -3 };
-		for(int bird = 0; bird < 3; bird++) {
+		static const int formation_x[] = { 0, -3, -6, -9, -12, -15, -18 };
+		static const int formation_y[] = { 0, 3, -3, 5, -6, 1, 7 };
+		for(int bird = 0; bird < 7; bird++) {
 			int bird_x = group_x + formation_x[bird] * bird_span;
 			int bird_y = group_y + formation_y[bird] * bird_span;
-			int flap = (int)((0.5 + 0.5 * sin(ticks / 210.0 + group * 1.8 + bird)) * (scale / 140));
-			if(flap < 1) flap = 1;
-			int tip_y = bird_y + bird_span / 4;
-			int shoulder_y = bird_y - flap;
-			thickLineRGBA(surface, bird_x - bird_span, tip_y,
-				bird_x - bird_span / 2, shoulder_y, 2, 23, 30, 43, 185);
-			thickLineRGBA(surface, bird_x - bird_span / 2, shoulder_y,
-				bird_x, bird_y, 2, 23, 30, 43, 185);
-			thickLineRGBA(surface, bird_x, bird_y,
-				bird_x + bird_span / 2, shoulder_y, 2, 23, 30, 43, 185);
-			thickLineRGBA(surface, bird_x + bird_span / 2, shoulder_y,
-				bird_x + bird_span, tip_y, 2, 23, 30, 43, 185);
+			int flap = (int)((0.5 + 0.5 * sin(ticks / 260.0 + group * 1.8 + bird)) * (bird_span / 2));
+			draw_bird(surface, bird_x, bird_y, bird_span, flap);
 		}
 	}
 
