@@ -37,7 +37,7 @@ const char* TITLE = "Gluqlo 1.1";
 const int DEFAULT_WIDTH = 1024;
 const int DEFAULT_HEIGHT = 768;
 
-bool twentyfourh = false;
+bool twentyfourh = true;
 bool leadingzero = false;
 bool fullscreen = false;
 bool animate = true;
