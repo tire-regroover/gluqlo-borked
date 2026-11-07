@@ -246,18 +246,6 @@ void render_backdrop(SDL_Surface *surface, Uint32 ticks) {
 				blue = (Uint8)(25 + 12 * ground_noise);
 			}
 
-			double horizon_distance = fabs(ny - (far_edge + 0.045)) / 0.12;
-			double fog_noise = smooth_noise(nx * 7.0 + drift * 0.32, ny * 14.0 - drift * 0.13, 1327) * 0.55
-				+ smooth_noise(nx * 19.0 + drift * 0.58, ny * 31.0 + drift * 0.2, 1429) * 0.45;
-			double fog_density = horizon_distance < 1.0 && fog_noise > 0.48
-				? (fog_noise - 0.48) * 1.9 * (1.0 - horizon_distance) : 0.0;
-			if(fog_density > 0.0) {
-				double amount = fog_density * 0.42;
-				red = blend_channel(red, (Uint8)(139 + 14 * fine), amount);
-				green = blend_channel(green, (Uint8)(153 + 16 * fine), amount);
-				blue = blend_channel(blue, (Uint8)(183 + 20 * fine), amount);
-			}
-
 			Uint32 pixel = SDL_MapRGB(surface->format, red, green, blue);
 			int block_width = surface->w - x < 4 ? surface->w - x : 4;
 			int block_height = surface->h - y < 4 ? surface->h - y : 4;
@@ -282,6 +270,26 @@ void render_backdrop(SDL_Surface *surface, Uint32 ticks) {
 		if(i % 23 == 0) filledCircleRGBA(surface, sx, sy, 3, 126, 158, 226, 13);
 		pixelRGBA(surface, sx, sy, 205, 214, 235, alpha);
 		if(i % 23 == 0) filledCircleRGBA(surface, sx, sy, 1, 237, 232, 222, alpha);
+	}
+
+	unsigned int rain_seed = 0x7f4a7c15u;
+	int rain_count = surface->w * surface->h / 1400;
+	if(rain_count < 90) rain_count = 90;
+	for(int i = 0; i < rain_count; i++) {
+		rain_seed = rain_seed * 1664525u + 1013904223u;
+		int start_x = rain_seed % surface->w;
+		rain_seed = rain_seed * 1664525u + 1013904223u;
+		int start_y = rain_seed % surface->h;
+		int length = 5 + (rain_seed >> 24) % 10;
+		int speed = 5 + i % 8;
+		double travel = ticks * speed / 150.0;
+		int y = (start_y + (int)travel) % (surface->h + length);
+		int x = (start_x + (int)(travel * 0.16)) % surface->w;
+		int x_end = x - length / 3;
+		int y_start = y - length;
+		Uint8 alpha = (Uint8)(38 + (rain_seed >> 16) % 48);
+		thickLineRGBA(surface, x, y, x_end, y_start, 1,
+			154, 174, 207, alpha);
 	}
 }
 
@@ -390,28 +398,6 @@ void render_digits(SDL_Surface *surface, SDL_Rect *background, char digits[], ch
 	SDL_FillRect(surface, &rect, SDL_MapRGB(surface->format, 0x35, 0x3a, 0x49));
 }
 
-void render_foreground_mist(SDL_Surface *surface, Uint32 ticks) {
-	SDL_Rect *cards[] = { &hourBackground, &minBackground };
-	int scale = surface->h < surface->w ? surface->h : surface->w;
-	int mist_height = scale / 38;
-	if(mist_height < 5) mist_height = 5;
-
-	for(int i = 0; i < 2; i++) {
-		SDL_Rect *card = cards[i];
-		double phase = ticks / (2500.0 + i * 700) + i * 2.3;
-		int center_x = card->x + card->w / 2 + (int)(sin(phase) * card->w * 0.28);
-		int center_y = card->y + card->h * (58 + 9 * sin(phase * 0.63)) / 100;
-		int width = card->w * 3 / 5;
-
-		filledEllipseRGBA(surface, center_x, center_y + mist_height / 3,
-			width, mist_height * 2, 105, 121, 153, 13);
-		filledEllipseRGBA(surface, center_x - card->w / 5, center_y,
-			width * 2 / 3, mist_height, 180, 190, 211, 13);
-		filledEllipseRGBA(surface, center_x + card->w / 6, center_y - mist_height / 3,
-			width / 2, mist_height * 2 / 3, 210, 214, 225, 9);
-	}
-}
-
 void render_clock(int maxsteps, int step, bool ambient_frame) {
 	char buffer[3], buffer2[3];
 	struct tm *_time;
@@ -477,10 +463,6 @@ void render_clock(int maxsteps, int step, bool ambient_frame) {
 		SDL_BlitSurface(date_surface, NULL, screen, &date_coords);
 		SDL_FreeSurface(date_surface);
 		past_yday = _time->tm_yday;
-	}
-
-	if(redraw || step == maxsteps - 1) {
-		render_foreground_mist(screen, SDL_GetTicks());
 	}
 
 	// flip backbuffer
