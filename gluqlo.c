@@ -22,6 +22,7 @@
 #include <string.h>
 #include <X11/Xlib.h>
 #include <time.h>
+#include <math.h>
 
 #include "SDL.h"
 #include "SDL_ttf.h"
@@ -44,6 +45,7 @@ bool animate = true;
 bool anykeyclose = false;
 
 int past_h = -1, past_m = -1, past_yday = -1;
+int queued_minute = -1;
 int burnin_x = 0, burnin_y = 0;
 int date_y = 0;
 
@@ -54,10 +56,10 @@ TTF_Font *font_time = NULL;
 TTF_Font *font_mode = NULL;
 TTF_Font *font_date = NULL;
 
-const SDL_Color FONT_COLOR = { 0xc8, 0xc4, 0xad };
-const SDL_Color DATE_COLOR = { 0xb2, 0xa9, 0x93 };
-const SDL_Color BACKGROUND_COLOR = { 0x13, 0x18, 0x15 };
-const SDL_Color CARD_BORDER_COLOR = { 0x35, 0x3c, 0x34 };
+const SDL_Color FONT_COLOR = { 0xda, 0xda, 0xe2 };
+const SDL_Color DATE_COLOR = { 0xc6, 0xc2, 0xcf };
+const SDL_Color BACKGROUND_COLOR = { 0x12, 0x14, 0x1d };
+const SDL_Color CARD_BORDER_COLOR = { 0x37, 0x3d, 0x4e };
 
 SDL_Surface *screen;
 
@@ -141,64 +143,145 @@ void render_ampm(SDL_Surface *surface, SDL_Rect *rect, int pm) {
 	SDL_FreeSurface(ampm);
 }
 
-void render_backdrop(SDL_Surface *surface) {
-	SDL_Rect line;
-	line.x = 0;
-	line.y = 0;
-	line.w = surface->w;
-	line.h = 1;
-	int y;
+static double hash_noise(int x, int y, Uint32 seed) {
+	Uint32 value = (Uint32)x * 374761393u + (Uint32)y * 668265263u + seed * 2246822519u;
+	value = (value ^ (value >> 13)) * 1274126177u;
+	value ^= value >> 16;
+	return value / 4294967295.0;
+}
 
-	for(y = 0; y < surface->h; y++) {
-		double blend = surface->h > 1 ? (double)y / (surface->h - 1) : 0;
-		Uint8 red = 25 - 12 * blend;
-		Uint8 green = 31 - 12 * blend;
-		Uint8 blue = 29 - 10 * blend;
-		line.y = y;
-		SDL_FillRect(surface, &line, SDL_MapRGB(surface->format, red, green, blue));
+static double smooth_noise(double x, double y, Uint32 seed) {
+	int x0 = (int)floor(x);
+	int y0 = (int)floor(y);
+	double fx = x - x0;
+	double fy = y - y0;
+	fx = fx * fx * (3.0 - 2.0 * fx);
+	fy = fy * fy * (3.0 - 2.0 * fy);
+	double top = hash_noise(x0, y0, seed) * (1.0 - fx)
+		+ hash_noise(x0 + 1, y0, seed) * fx;
+	double bottom = hash_noise(x0, y0 + 1, seed) * (1.0 - fx)
+		+ hash_noise(x0 + 1, y0 + 1, seed) * fx;
+	return top * (1.0 - fy) + bottom * fy;
+}
+
+static Uint8 blend_channel(Uint8 from, Uint8 to, double amount) {
+	if(amount < 0.0) amount = 0.0;
+	if(amount > 1.0) amount = 1.0;
+	return (Uint8)(from + (to - from) * amount);
+}
+
+void render_backdrop(SDL_Surface *surface, Uint32 ticks) {
+	if(surface->format->BytesPerPixel != 4) {
+		fprintf(stderr, "Unsupported screen pixel format: expected 32-bit pixels\n");
+		return;
+	}
+	if(SDL_MUSTLOCK(surface) && SDL_LockSurface(surface) < 0) {
+		fprintf(stderr, "Unable to lock screen surface: %s\n", SDL_GetError());
+		return;
 	}
 
-	int scale = surface->h < surface->w ? surface->h : surface->w;
-	static const int ridge_x_percent[] = { 0, 12, 23, 37, 49, 63, 77, 89, 100, 100, 0 };
-	static const int far_ridge_y_percent[] = { 67, 59, 65, 57, 63, 56, 64, 58, 66, 100, 100 };
-	static const int near_ridge_y_percent[] = { 77, 70, 76, 69, 74, 68, 75, 70, 78, 100, 100 };
-	Sint16 ridge_x[11], far_ridge_y[11], near_ridge_y[11];
-	for(size_t i = 0; i < sizeof(ridge_x_percent) / sizeof(ridge_x_percent[0]); i++) {
-		ridge_x[i] = (Sint16)(surface->w * ridge_x_percent[i] / 100);
-		far_ridge_y[i] = (Sint16)(surface->h * far_ridge_y_percent[i] / 100);
-		near_ridge_y[i] = (Sint16)(surface->h * near_ridge_y_percent[i] / 100);
+	double drift = ticks * 0.000018;
+	for(int y = 0; y < surface->h; y += 4) {
+		double ny = (double)(y + 2) / surface->h;
+		double sky_blend = ny / 0.68;
+		for(int x = 0; x < surface->w; x += 4) {
+			double nx = (double)(x + 2) / surface->w;
+			double fine = smooth_noise(nx * 25.0 + drift * 0.35, ny * 21.0, 41);
+			Uint8 red = blend_channel(5, 35, sky_blend);
+			Uint8 green = blend_channel(8, 37, sky_blend);
+			Uint8 blue = blend_channel(21, 67, sky_blend);
+
+			if(ny < 0.62) {
+				double broad = smooth_noise(nx * 3.2 + drift * 0.25, ny * 3.8, 101);
+				double middle = smooth_noise(nx * 8.5 - drift * 0.42, ny * 10.0 + drift * 0.12, 211);
+				double detail = smooth_noise(nx * 23.0 + drift * 0.75, ny * 28.0 - drift * 0.2, 307);
+				double turbulence = broad * 0.48 + middle * 0.34 + detail * 0.18;
+				double band = 0.27 + (smooth_noise(nx * 2.3 + drift * 0.08, 1.4, 419) - 0.5) * 0.24;
+				double band_width = 0.24 + broad * 0.06;
+				double band_edge = 1.0 - fabs(ny - band) / band_width;
+				double nebula = band_edge > 0.0
+					? (turbulence - 0.36) * 3.4 * band_edge : 0.0;
+				if(nebula > 0.0) {
+					double hue = smooth_noise(nx * 4.0 - drift * 0.08, ny * 5.5, 523);
+					Uint8 nebula_red = blend_channel(62, 151, hue);
+					Uint8 nebula_green = blend_channel(49, 83, hue);
+					Uint8 nebula_blue = blend_channel(145, 226, 1.0 - hue * 0.45);
+					double light = nebula * (0.24 + 0.30 * turbulence);
+					red = blend_channel(red, nebula_red, light);
+					green = blend_channel(green, nebula_green, light);
+					blue = blend_channel(blue, nebula_blue, light);
+				}
+
+				double cloud_mass = smooth_noise(nx * 4.2 + drift * 0.42, ny * 6.0 + drift * 0.08, 631) * 0.62
+					+ smooth_noise(nx * 13.0 + drift * 0.7, ny * 19.0 - drift * 0.16, 719) * 0.38;
+				double cloud_band = 0.48 + 0.035 * (smooth_noise(nx * 3.0 + drift * 0.14, 2.0, 811) - 0.5);
+				double cloud_envelope = 1.0 - fabs(ny - cloud_band) / 0.14;
+				double cloud_density = cloud_envelope > 0.0
+					? (cloud_mass - 0.50) * 3.2 * cloud_envelope : 0.0;
+				if(cloud_density > 0.0) {
+					double amount = cloud_density * 0.42;
+					red = blend_channel(red, (Uint8)(123 + 32 * fine), amount);
+					green = blend_channel(green, (Uint8)(139 + 29 * fine), amount);
+					blue = blend_channel(blue, (Uint8)(174 + 34 * fine), amount);
+				}
+			}
+
+			double far_edge = 0.68 + (smooth_noise(nx * 3.6, 1.0, 907) - 0.5) * 0.13;
+			double middle_edge = 0.79 + (smooth_noise(nx * 5.2 + 8.0, 2.0, 1013) - 0.5) * 0.10;
+			double near_edge = 0.88 + (smooth_noise(nx * 8.0 - 3.0, 3.0, 1123) - 0.5) * 0.09;
+			double ground_noise = smooth_noise(nx * 28.0, ny * 32.0, 1237);
+			if(ny > far_edge) {
+				red = (Uint8)(35 + 17 * ground_noise);
+				green = (Uint8)(44 + 21 * ground_noise);
+				blue = (Uint8)(60 + 24 * ground_noise);
+			}
+			if(ny > middle_edge) {
+				red = (Uint8)(20 + 10 * ground_noise);
+				green = (Uint8)(31 + 15 * ground_noise);
+				blue = (Uint8)(39 + 17 * ground_noise);
+			}
+			if(ny > near_edge) {
+				red = (Uint8)(9 + 8 * ground_noise);
+				green = (Uint8)(17 + 10 * ground_noise);
+				blue = (Uint8)(25 + 12 * ground_noise);
+			}
+
+			double horizon_distance = fabs(ny - (far_edge + 0.045)) / 0.12;
+			double fog_noise = smooth_noise(nx * 7.0 + drift * 0.32, ny * 14.0 - drift * 0.13, 1327) * 0.55
+				+ smooth_noise(nx * 19.0 + drift * 0.58, ny * 31.0 + drift * 0.2, 1429) * 0.45;
+			double fog_density = horizon_distance < 1.0 && fog_noise > 0.48
+				? (fog_noise - 0.48) * 1.9 * (1.0 - horizon_distance) : 0.0;
+			if(fog_density > 0.0) {
+				double amount = fog_density * 0.42;
+				red = blend_channel(red, (Uint8)(139 + 14 * fine), amount);
+				green = blend_channel(green, (Uint8)(153 + 16 * fine), amount);
+				blue = blend_channel(blue, (Uint8)(183 + 20 * fine), amount);
+			}
+
+			Uint32 pixel = SDL_MapRGB(surface->format, red, green, blue);
+			int block_width = surface->w - x < 4 ? surface->w - x : 4;
+			int block_height = surface->h - y < 4 ? surface->h - y : 4;
+			for(int row_index = 0; row_index < block_height; row_index++) {
+				Uint32 *row = (Uint32 *)((Uint8 *)surface->pixels + (y + row_index) * surface->pitch);
+				for(int column = 0; column < block_width; column++) {
+					row[x + column] = pixel;
+				}
+			}
+		}
 	}
-	filledPolygonRGBA(surface, ridge_x, far_ridge_y, sizeof(ridge_x) / sizeof(ridge_x[0]),
-		33, 42, 37, 255);
+	if(SDL_MUSTLOCK(surface)) SDL_UnlockSurface(surface);
 
-	static const int tree_x[] = { 3, 11, 18, 27, 35, 44, 53, 62, 71, 80, 90, 98 };
-	static const int tree_top[] = { 30, 19, 35, 24, 38, 21, 34, 26, 40, 22, 32, 18 };
-	int trunk_width = scale / 180;
-	if(trunk_width < 2) trunk_width = 2;
-	if(trunk_width > 14) trunk_width = 14;
-	for(size_t i = 0; i < sizeof(tree_x) / sizeof(tree_x[0]); i++) {
-		int x = surface->w * tree_x[i] / 100;
-		int top = surface->h * tree_top[i] / 100;
-		int branch_y = top + (surface->h - top) / 3;
-		thickLineRGBA(surface, x, top, x + surface->w / 100, surface->h,
-			trunk_width, 55, 62, 53, 105);
-		thickLineRGBA(surface, x + surface->w / 100, branch_y, x - scale / 14, top + scale / 10,
-			trunk_width / 2, 55, 62, 53, 80);
-		thickLineRGBA(surface, x + surface->w / 100, branch_y + scale / 12,
-			x + scale / 13, top + scale / 8, trunk_width / 2, 55, 62, 53, 80);
-	}
-
-	filledPolygonRGBA(surface, ridge_x, near_ridge_y, sizeof(ridge_x) / sizeof(ridge_x[0]),
-		20, 28, 23, 255);
-
-	// A thin veil of mist softens the layers without competing with the clock.
-	int mist_y = surface->h * 64 / 100;
-	int mist_height = scale / 18;
-	if(mist_height < 8) mist_height = 8;
-	for(y = 0; y < mist_height; y += 2) {
-		Uint8 alpha = 2 + 9 * (mist_height - y) / mist_height;
-		thickLineRGBA(surface, 0, mist_y + y, surface->w, mist_y + y,
-			2, 125, 132, 116, alpha);
+	Uint32 star_seed = 0x4f1bbcdcu;
+	for(int i = 0; i < surface->w * surface->h / 1900; i++) {
+		star_seed = star_seed * 1664525u + 1013904223u;
+		int sx = star_seed % surface->w;
+		star_seed = star_seed * 1664525u + 1013904223u;
+		int sy = star_seed % (surface->h * 54 / 100);
+		double twinkle = 0.5 + 0.5 * sin(ticks / (700.0 + i % 13 * 91) + i * 1.73);
+		Uint8 alpha = (Uint8)(35 + twinkle * 95);
+		if(i % 23 == 0) filledCircleRGBA(surface, sx, sy, 3, 126, 158, 226, 13);
+		pixelRGBA(surface, sx, sy, 205, 214, 235, alpha);
+		if(i % 23 == 0) filledCircleRGBA(surface, sx, sy, 1, 237, 232, 222, alpha);
 	}
 }
 
@@ -301,13 +384,35 @@ void render_digits(SDL_Surface *surface, SDL_Rect *background, char digits[], ch
 	rect.w = background->w;
 	rect.x = background->x;
 	rect.y = background->y + (background->h - rect.h) / 2;
-	SDL_FillRect(surface, &rect, SDL_MapRGB(surface->format, 5, 11, 8));
+	SDL_FillRect(surface, &rect, SDL_MapRGB(surface->format, 7, 9, 15));
 	rect.y += rect.h;
 	rect.h = 1;
-	SDL_FillRect(surface, &rect, SDL_MapRGB(surface->format, 0x27, 0x32, 0x25));
+	SDL_FillRect(surface, &rect, SDL_MapRGB(surface->format, 0x35, 0x3a, 0x49));
 }
 
-void render_clock(int maxsteps, int step) {
+void render_foreground_mist(SDL_Surface *surface, Uint32 ticks) {
+	SDL_Rect *cards[] = { &hourBackground, &minBackground };
+	int scale = surface->h < surface->w ? surface->h : surface->w;
+	int mist_height = scale / 38;
+	if(mist_height < 5) mist_height = 5;
+
+	for(int i = 0; i < 2; i++) {
+		SDL_Rect *card = cards[i];
+		double phase = ticks / (2500.0 + i * 700) + i * 2.3;
+		int center_x = card->x + card->w / 2 + (int)(sin(phase) * card->w * 0.28);
+		int center_y = card->y + card->h * (58 + 9 * sin(phase * 0.63)) / 100;
+		int width = card->w * 3 / 5;
+
+		filledEllipseRGBA(surface, center_x, center_y + mist_height / 3,
+			width, mist_height * 2, 105, 121, 153, 13);
+		filledEllipseRGBA(surface, center_x - card->w / 5, center_y,
+			width * 2 / 3, mist_height, 180, 190, 211, 13);
+		filledEllipseRGBA(surface, center_x + card->w / 6, center_y - mist_height / 3,
+			width / 2, mist_height * 2 / 3, 210, 214, 225, 9);
+	}
+}
+
+void render_clock(int maxsteps, int step, bool ambient_frame) {
 	char buffer[3], buffer2[3];
 	struct tm *_time;
 	time_t rawtime;
@@ -328,22 +433,25 @@ void render_clock(int maxsteps, int step) {
 		minBackground.y += new_burnin_y - burnin_y;
 		burnin_x = new_burnin_x;
 		burnin_y = new_burnin_y;
-		render_backdrop(screen);
-		past_h = past_m = -1;
 		moved = true;
 	}
+	if(moved || ambient_frame) {
+		render_backdrop(screen, SDL_GetTicks());
+		past_h = past_m = -1;
+	}
+	bool redraw = moved || ambient_frame;
 	int render_steps = moved ? 20 : maxsteps;
 	int render_step = moved ? 19 : step;
 
 	// draw hours
-	if(_time->tm_hour != past_h) {
+	if(_time->tm_hour != past_h || redraw) {
 		int h = twentyfourh ? _time->tm_hour : (_time->tm_hour + 11) % 12 + 1;
 		if(leadingzero) {
 			snprintf(buffer, 3, "%02d", h);
-			snprintf(buffer2, 3, "%02d", past_h);
+			snprintf(buffer2, 3, "%02d", redraw ? h : past_h);
 		} else {
 			snprintf(buffer, 3, "%d", h);
-			snprintf(buffer2, 3, "%d", past_h);
+			snprintf(buffer2, 3, "%d", redraw ? h : past_h);
 		}
 		render_digits(screen, &hourBackground, buffer, buffer2, render_steps, render_step);
 		// draw am/pm
@@ -351,13 +459,13 @@ void render_clock(int maxsteps, int step) {
 	}
 
 	// draw minutes
-	if(_time->tm_min != past_m) {
+	if(_time->tm_min != past_m || redraw) {
 		snprintf(buffer, 3, "%02d", _time->tm_min);
-		snprintf(buffer2, 3, "%02d", past_m);
+		snprintf(buffer2, 3, "%02d", redraw ? _time->tm_min : past_m);
 		render_digits(screen, &minBackground, buffer, buffer2, render_steps, render_step);
 	}
 
-	if(_time->tm_yday != past_yday || moved) {
+	if(_time->tm_yday != past_yday || redraw) {
 		char date[128];
 		SDL_Surface *date_surface;
 		SDL_Rect date_coords;
@@ -371,6 +479,10 @@ void render_clock(int maxsteps, int step) {
 		past_yday = _time->tm_yday;
 	}
 
+	if(redraw || step == maxsteps - 1) {
+		render_foreground_mist(screen, SDL_GetTicks());
+	}
+
 	// flip backbuffer
 	SDL_Flip(screen);
 
@@ -382,7 +494,7 @@ void render_clock(int maxsteps, int step) {
 
 void render_animation() {
 	if(!animate) {
-		render_clock(20, 19);
+		render_clock(20, 19, false);
 		return;
 	}
 
@@ -400,7 +512,7 @@ void render_animation() {
 			current_tick = end_tick;
 		}
 		frame = 99 * (current_tick-start_tick) / (end_tick-start_tick);
-		render_clock(100, frame);
+		render_clock(100, frame, false);
 	}
 }
 
@@ -412,18 +524,22 @@ Uint32 update_time(Uint32 interval, void *param) {
 	time(&rawtime);
 	time_i = localtime(&rawtime);
 
-	if(time_i->tm_min != past_m) {
+	if(time_i->tm_min != past_m && time_i->tm_min != queued_minute) {
+		queued_minute = time_i->tm_min;
 		e.type = SDL_USEREVENT;
 		e.user.code = 0;
 		e.user.data1 = NULL;
 		e.user.data2 = NULL;
 		SDL_PushEvent(&e);
-		interval = 1000 * (60 - time_i->tm_sec) - 250;
-	} else {
-		interval = 250;
+	} else if(time_i->tm_min == past_m) {
+		e.type = SDL_USEREVENT;
+		e.user.code = 1;
+		e.user.data1 = NULL;
+		e.user.data2 = NULL;
+		SDL_PushEvent(&e);
 	}
 
-	return interval;
+	return 100;
 }
 
 int main(int argc, char** argv ) {
@@ -555,8 +671,8 @@ int main(int argc, char** argv ) {
 		return 1;
 	}
 
-	// draw the ambient grid behind the clock
-	render_backdrop(screen);
+	// Draw the layered forest before placing the clock over it.
+	render_backdrop(screen, SDL_GetTicks());
 
 	// calculate box coordinates
 	int rectsize;
@@ -625,12 +741,12 @@ int main(int argc, char** argv ) {
 	fill_rounded_box_b(bg, &cardrect, inner_radius, BACKGROUND_COLOR);
 
 	// draw current time
-	render_clock(20, 19);
+	render_clock(20, 19, false);
 
 	// main loop
 	bool done = false;
 	SDL_Event event;
-	SDL_TimerID timer = SDL_AddTimer(60, update_time, NULL);
+	SDL_TimerID timer = SDL_AddTimer(100, update_time, NULL);
 
 	int mouse_x = -1;
 	int mouse_y = -1;
@@ -638,7 +754,11 @@ int main(int argc, char** argv ) {
 	while(!done && SDL_WaitEvent(&event)) {
 		switch(event.type) {
 			case SDL_USEREVENT:
-				render_animation();
+				if(event.user.code == 1) {
+					render_clock(20, 19, true);
+				} else {
+					render_animation();
+				}
 				break;
 			case SDL_KEYDOWN:
 				if(anykeyclose){
