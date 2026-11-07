@@ -54,8 +54,10 @@ TTF_Font *font_time = NULL;
 TTF_Font *font_mode = NULL;
 TTF_Font *font_date = NULL;
 
-const SDL_Color FONT_COLOR = { 0xb7, 0xb7, 0xb7 };
-const SDL_Color BACKGROUND_COLOR = { 0x0f, 0x0f, 0x0f };
+const SDL_Color FONT_COLOR = { 0xc8, 0xc4, 0xad };
+const SDL_Color DATE_COLOR = { 0xb2, 0xa9, 0x93 };
+const SDL_Color BACKGROUND_COLOR = { 0x13, 0x18, 0x15 };
+const SDL_Color CARD_BORDER_COLOR = { 0x35, 0x3c, 0x34 };
 
 SDL_Surface *screen;
 
@@ -139,6 +141,67 @@ void render_ampm(SDL_Surface *surface, SDL_Rect *rect, int pm) {
 	SDL_FreeSurface(ampm);
 }
 
+void render_backdrop(SDL_Surface *surface) {
+	SDL_Rect line;
+	line.x = 0;
+	line.y = 0;
+	line.w = surface->w;
+	line.h = 1;
+	int y;
+
+	for(y = 0; y < surface->h; y++) {
+		double blend = surface->h > 1 ? (double)y / (surface->h - 1) : 0;
+		Uint8 red = 25 - 12 * blend;
+		Uint8 green = 31 - 12 * blend;
+		Uint8 blue = 29 - 10 * blend;
+		line.y = y;
+		SDL_FillRect(surface, &line, SDL_MapRGB(surface->format, red, green, blue));
+	}
+
+	int scale = surface->h < surface->w ? surface->h : surface->w;
+	static const int ridge_x_percent[] = { 0, 12, 23, 37, 49, 63, 77, 89, 100, 100, 0 };
+	static const int far_ridge_y_percent[] = { 67, 59, 65, 57, 63, 56, 64, 58, 66, 100, 100 };
+	static const int near_ridge_y_percent[] = { 77, 70, 76, 69, 74, 68, 75, 70, 78, 100, 100 };
+	Sint16 ridge_x[11], far_ridge_y[11], near_ridge_y[11];
+	for(size_t i = 0; i < sizeof(ridge_x_percent) / sizeof(ridge_x_percent[0]); i++) {
+		ridge_x[i] = (Sint16)(surface->w * ridge_x_percent[i] / 100);
+		far_ridge_y[i] = (Sint16)(surface->h * far_ridge_y_percent[i] / 100);
+		near_ridge_y[i] = (Sint16)(surface->h * near_ridge_y_percent[i] / 100);
+	}
+	filledPolygonRGBA(surface, ridge_x, far_ridge_y, sizeof(ridge_x) / sizeof(ridge_x[0]),
+		33, 42, 37, 255);
+
+	static const int tree_x[] = { 3, 11, 18, 27, 35, 44, 53, 62, 71, 80, 90, 98 };
+	static const int tree_top[] = { 30, 19, 35, 24, 38, 21, 34, 26, 40, 22, 32, 18 };
+	int trunk_width = scale / 180;
+	if(trunk_width < 2) trunk_width = 2;
+	if(trunk_width > 14) trunk_width = 14;
+	for(size_t i = 0; i < sizeof(tree_x) / sizeof(tree_x[0]); i++) {
+		int x = surface->w * tree_x[i] / 100;
+		int top = surface->h * tree_top[i] / 100;
+		int branch_y = top + (surface->h - top) / 3;
+		thickLineRGBA(surface, x, top, x + surface->w / 100, surface->h,
+			trunk_width, 55, 62, 53, 105);
+		thickLineRGBA(surface, x + surface->w / 100, branch_y, x - scale / 14, top + scale / 10,
+			trunk_width / 2, 55, 62, 53, 80);
+		thickLineRGBA(surface, x + surface->w / 100, branch_y + scale / 12,
+			x + scale / 13, top + scale / 8, trunk_width / 2, 55, 62, 53, 80);
+	}
+
+	filledPolygonRGBA(surface, ridge_x, near_ridge_y, sizeof(ridge_x) / sizeof(ridge_x[0]),
+		20, 28, 23, 255);
+
+	// A thin veil of mist softens the layers without competing with the clock.
+	int mist_y = surface->h * 64 / 100;
+	int mist_height = scale / 18;
+	if(mist_height < 8) mist_height = 8;
+	for(y = 0; y < mist_height; y += 2) {
+		Uint8 alpha = 2 + 9 * (mist_height - y) / mist_height;
+		thickLineRGBA(surface, 0, mist_y + y, surface->w, mist_y + y,
+			2, 125, 132, 116, alpha);
+	}
+}
+
 
 
 void blit_digits(SDL_Surface *surface, SDL_Rect *rect, int spc, char digits[], SDL_Color color) {
@@ -179,7 +242,7 @@ void render_digits(SDL_Surface *surface, SDL_Rect *background, char digits[], ch
 	SDL_Rect rect, dstrect;
 	SDL_Color color;
 	double scale;
-	Uint8 c;
+	double intensity;
 
 	// int spc = surface->h * .0125;
 	bool is_h = surface->h < surface->w;
@@ -199,12 +262,14 @@ void render_digits(SDL_Surface *surface, SDL_Rect *background, char digits[], ch
 	int upperhalf = (step+1) <= halfsteps;
 	if(upperhalf) {
 		scale = 1.0 - (1.0 * step) / (halfsteps - 1);
-		c = 0xb7 - 0xb7 * (1.0 * step) / (halfsteps - 1);
+		intensity = 1.0 - (1.0 * step) / (halfsteps - 1);
 	} else {
 		scale = ((1.0 * step) - halfsteps + 1) / halfsteps;
-		c = 0xb7 * ((1.0 * step) - halfsteps + 1) / halfsteps;
+		intensity = ((1.0 * step) - halfsteps + 1) / halfsteps;
 	}
-	color.r = color.g = color.b = c;
+	color.r = FONT_COLOR.r * intensity;
+	color.g = FONT_COLOR.g * intensity;
+	color.b = FONT_COLOR.b * intensity;
 
 	// create surface to scale from filled background surface
 	SDL_Surface *bgcopy = SDL_ConvertSurface(bg, bg->format, bg->flags);
@@ -236,10 +301,10 @@ void render_digits(SDL_Surface *surface, SDL_Rect *background, char digits[], ch
 	rect.w = background->w;
 	rect.x = background->x;
 	rect.y = background->y + (background->h - rect.h) / 2;
-	SDL_FillRect(surface, &rect, SDL_MapRGB(surface->format, 0, 0, 0));
+	SDL_FillRect(surface, &rect, SDL_MapRGB(surface->format, 5, 11, 8));
 	rect.y += rect.h;
 	rect.h = 1;
-	SDL_FillRect(surface, &rect, SDL_MapRGB(surface->format, 0x1a, 0x1a, 0x1a));
+	SDL_FillRect(surface, &rect, SDL_MapRGB(surface->format, 0x27, 0x32, 0x25));
 }
 
 void render_clock(int maxsteps, int step) {
@@ -263,7 +328,7 @@ void render_clock(int maxsteps, int step) {
 		minBackground.y += new_burnin_y - burnin_y;
 		burnin_x = new_burnin_x;
 		burnin_y = new_burnin_y;
-		SDL_FillRect(screen, NULL, SDL_MapRGB(screen->format, 0, 0, 0));
+		render_backdrop(screen);
 		past_h = past_m = -1;
 		moved = true;
 	}
@@ -298,13 +363,7 @@ void render_clock(int maxsteps, int step) {
 		SDL_Rect date_coords;
 		strftime(date, sizeof(date), "%A, %B", _time);
 		snprintf(date + strlen(date), sizeof(date) - strlen(date), " %d, %d", _time->tm_mday, _time->tm_year + 1900);
-		date_surface = TTF_RenderText_Blended(font_date, date, FONT_COLOR);
-		SDL_Rect date_background;
-		date_background.x = 0;
-		date_background.y = date_y + burnin_y;
-		date_background.w = screen->w;
-		date_background.h = TTF_FontHeight(font_date);
-		SDL_FillRect(screen, &date_background, SDL_MapRGB(screen->format, 0, 0, 0));
+		date_surface = TTF_RenderText_Blended(font_date, date, DATE_COLOR);
 		date_coords.x = (screen->w - date_surface->w) / 2 + burnin_x;
 		date_coords.y = date_y + burnin_y;
 		SDL_BlitSurface(date_surface, NULL, screen, &date_coords);
@@ -496,8 +555,8 @@ int main(int argc, char** argv ) {
 		return 1;
 	}
 
-	// clear screen
-	SDL_FillRect(screen, 0, SDL_MapRGB(screen->format, 0, 0, 0));
+	// draw the ambient grid behind the clock
+	render_backdrop(screen);
 
 	// calculate box coordinates
 	int rectsize;
@@ -554,7 +613,16 @@ int main(int argc, char** argv ) {
 	bgrect.w = rectsize;
 	bgrect.h = rectsize;
 	bg = SDL_CreateRGBSurface(SDL_HWSURFACE|SDL_SRCALPHA, rectsize, rectsize, 32, 0xff000000, 0x00ff0000, 0x0000ff00, 0x000000ff);
-	fill_rounded_box_b(bg, &bgrect, radius, BACKGROUND_COLOR);
+	fill_rounded_box_b(bg, &bgrect, radius, CARD_BORDER_COLOR);
+	int border_width = rectsize / 120;
+	if(border_width < 1) border_width = 1;
+	SDL_Rect cardrect;
+	cardrect.x = border_width;
+	cardrect.y = border_width;
+	cardrect.w = rectsize - 2 * border_width;
+	cardrect.h = rectsize - 2 * border_width;
+	int inner_radius = radius > border_width ? radius - border_width : 1;
+	fill_rounded_box_b(bg, &cardrect, inner_radius, BACKGROUND_COLOR);
 
 	// draw current time
 	render_clock(20, 19);
