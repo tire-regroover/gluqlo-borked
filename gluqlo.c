@@ -37,19 +37,22 @@ const char* TITLE = "Gluqlo 1.1";
 const int DEFAULT_WIDTH = 1024;
 const int DEFAULT_HEIGHT = 768;
 
-bool twentyfourh = true;
+bool twentyfourh = false;
 bool leadingzero = false;
 bool fullscreen = false;
 bool animate = true;
 bool anykeyclose = false;
 
-int past_h = -1, past_m = -1;
+int past_h = -1, past_m = -1, past_yday = -1;
+int burnin_x = 0, burnin_y = 0;
+int date_y = 0;
 
 int width = DEFAULT_WIDTH;
 int height = DEFAULT_HEIGHT;
 
 TTF_Font *font_time = NULL;
 TTF_Font *font_mode = NULL;
+TTF_Font *font_date = NULL;
 
 const SDL_Color FONT_COLOR = { 0xb7, 0xb7, 0xb7 };
 const SDL_Color BACKGROUND_COLOR = { 0x0f, 0x0f, 0x0f };
@@ -220,7 +223,7 @@ void render_digits(SDL_Surface *surface, SDL_Rect *background, char digits[], ch
 	dstrect.x = background->x;
 	dstrect.y = background->y + ( upperhalf ? ((background->h - scaled->h) / 2) : background->h / 2);
 	dstrect.w = rect.w;
-	dstrect.h = rect.h;	
+	dstrect.h = rect.h;
 	SDL_SetClipRect(surface, &dstrect);
 	SDL_BlitSurface(scaled, &rect, surface, &dstrect);
 	SDL_SetClipRect(surface, NULL);
@@ -243,9 +246,29 @@ void render_clock(int maxsteps, int step) {
 	char buffer[3], buffer2[3];
 	struct tm *_time;
 	time_t rawtime;
+	static const int offset_x[] = { -1, 0, 1, 1, 1, 0, -1, -1 };
+	static const int offset_y[] = { 0, -1, -1, 0, 1, 1, 0, -1 };
+	int phase, new_burnin_x, new_burnin_y;
+	bool moved = false;
 
 	time(&rawtime);
 	_time = localtime(&rawtime);
+	phase = (rawtime / 300) % 8;
+	new_burnin_x = offset_x[phase] * (screen->w / 80);
+	new_burnin_y = offset_y[phase] * (screen->h / 80);
+	if(new_burnin_x != burnin_x || new_burnin_y != burnin_y) {
+		hourBackground.x += new_burnin_x - burnin_x;
+		hourBackground.y += new_burnin_y - burnin_y;
+		minBackground.x += new_burnin_x - burnin_x;
+		minBackground.y += new_burnin_y - burnin_y;
+		burnin_x = new_burnin_x;
+		burnin_y = new_burnin_y;
+		SDL_FillRect(screen, NULL, SDL_MapRGB(screen->format, 0, 0, 0));
+		past_h = past_m = -1;
+		moved = true;
+	}
+	int render_steps = moved ? 20 : maxsteps;
+	int render_step = moved ? 19 : step;
 
 	// draw hours
 	if(_time->tm_hour != past_h) {
@@ -257,7 +280,7 @@ void render_clock(int maxsteps, int step) {
 			snprintf(buffer, 3, "%d", h);
 			snprintf(buffer2, 3, "%d", past_h);
 		}
-		render_digits(screen, &hourBackground, buffer, buffer2, maxsteps, step);
+		render_digits(screen, &hourBackground, buffer, buffer2, render_steps, render_step);
 		// draw am/pm
 		if(!twentyfourh) render_ampm(screen, &hourBackground, _time->tm_hour >= 12);
 	}
@@ -266,13 +289,33 @@ void render_clock(int maxsteps, int step) {
 	if(_time->tm_min != past_m) {
 		snprintf(buffer, 3, "%02d", _time->tm_min);
 		snprintf(buffer2, 3, "%02d", past_m);
-		render_digits(screen, &minBackground, buffer, buffer2, maxsteps, step);
+		render_digits(screen, &minBackground, buffer, buffer2, render_steps, render_step);
+	}
+
+	if(_time->tm_yday != past_yday || moved) {
+		char date[128];
+		SDL_Surface *date_surface;
+		SDL_Rect date_coords;
+		strftime(date, sizeof(date), "%A, %B", _time);
+		snprintf(date + strlen(date), sizeof(date) - strlen(date), " %d, %d", _time->tm_mday, _time->tm_year + 1900);
+		date_surface = TTF_RenderText_Blended(font_date, date, FONT_COLOR);
+		SDL_Rect date_background;
+		date_background.x = 0;
+		date_background.y = date_y + burnin_y;
+		date_background.w = screen->w;
+		date_background.h = TTF_FontHeight(font_date);
+		SDL_FillRect(screen, &date_background, SDL_MapRGB(screen->format, 0, 0, 0));
+		date_coords.x = (screen->w - date_surface->w) / 2 + burnin_x;
+		date_coords.y = date_y + burnin_y;
+		SDL_BlitSurface(date_surface, NULL, screen, &date_coords);
+		SDL_FreeSurface(date_surface);
+		past_yday = _time->tm_yday;
 	}
 
 	// flip backbuffer
 	SDL_Flip(screen);
 
-	if(step == maxsteps-1) {
+	if(moved || step == maxsteps-1) {
 		past_h = _time->tm_hour;
 		past_m = _time->tm_min;
 	}
@@ -429,12 +472,26 @@ int main(int argc, char** argv ) {
 	height = screen->h * display_scale_factor;
 
 	bool is_horizontal = width > height;
-	
+
 	TTF_Init();
 	atexit(TTF_Quit);
 	font_time = TTF_OpenFont(FONT, (is_horizontal ? height : width) / 1.68 );
 	font_mode = TTF_OpenFont(FONT, (is_horizontal ? height : width) / 16.5);
 	if (!font_time || !font_mode) {
+		fprintf(stderr, "TTF_OpenFont: %s\n", TTF_GetError());
+		return 1;
+	}
+	static const char *date_font_paths[] = {
+		"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+		"/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+		"/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+		"/usr/share/fonts/truetype/freefont/FreeSans.ttf"
+	};
+	int date_font_size = (is_horizontal ? height : width) / 24;
+	for(size_t i = 0; i < sizeof(date_font_paths) / sizeof(date_font_paths[0]) && !font_date; i++) {
+		font_date = TTF_OpenFont(date_font_paths[i], date_font_size);
+	}
+	if (!font_date) {
 		fprintf(stderr, "TTF_OpenFont: %s\n", TTF_GetError());
 		return 1;
 	}
@@ -446,16 +503,18 @@ int main(int argc, char** argv ) {
 	int rectsize;
 	int spacing;
 	int radius;
+	int date_gap = TTF_FontHeight(font_date) / 2;
 
 	if (is_horizontal) {
 		rectsize = height * 0.6;
 		spacing = width * .031;
-		radius =  height * .05714;
+		radius = rectsize * .0952;
 	}
 	else {
-		rectsize = width * 0.6;
 		spacing = height * .031;
-		radius =  width * .05714;
+		int max_rectsize = (height - TTF_FontHeight(font_date) - date_gap * 2 - spacing) / 2;
+		rectsize = width * 0.6 < max_rectsize ? width * 0.6 : max_rectsize;
+		radius = rectsize * .0952;
 	}
 
 	int jitter_width  = 1;
@@ -471,20 +530,22 @@ int main(int argc, char** argv ) {
 	minBackground.h = rectsize;
 
 	if (is_horizontal) {
-		hourBackground.x = 0.5 * (width - (0.031 * width) - (1.2 * height))
+		hourBackground.x = 0.5 * (width - (2 * rectsize) - spacing)
 										+ jitter_width;
-		hourBackground.y = 0.2 * height + jitter_height;
+		hourBackground.y = (height - rectsize - date_gap - TTF_FontHeight(font_date)) / 2 + jitter_height;
 
-		minBackground.x = hourBackground.x + (0.6 * height) + spacing;
+		minBackground.x = hourBackground.x + rectsize + spacing;
 		minBackground.y = hourBackground.y;
+		date_y = hourBackground.y + rectsize + date_gap;
 	}
 	else {
-		hourBackground.y = 0.5 * (height - (0.031 * height) - (1.2 * width))
+		hourBackground.y = (height - (2 * rectsize) - spacing - date_gap - TTF_FontHeight(font_date)) / 2
 										+ jitter_height;
-		hourBackground.x = 0.2 * width + jitter_width;
+		hourBackground.x = (width - rectsize) / 2 + jitter_width;
 
-		minBackground.y = hourBackground.y + (0.6 * width) + spacing;
+		minBackground.y = hourBackground.y + rectsize + spacing;
 		minBackground.x = hourBackground.x;
+		date_y = minBackground.y + rectsize + date_gap;
 	}
 
 	// create background surface
@@ -504,7 +565,7 @@ int main(int argc, char** argv ) {
 	SDL_TimerID timer = SDL_AddTimer(60, update_time, NULL);
 
 	int mouse_x = -1;
-	int mouse_y = -1;	
+	int mouse_y = -1;
 
 	while(!done && SDL_WaitEvent(&event)) {
 		switch(event.type) {
@@ -551,6 +612,7 @@ int main(int argc, char** argv ) {
 
 	TTF_CloseFont(font_time);
 	TTF_CloseFont(font_mode);
+	TTF_CloseFont(font_date);
 
 	return 0;
 }
