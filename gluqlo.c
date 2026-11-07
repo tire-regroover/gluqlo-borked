@@ -68,6 +68,7 @@ SDL_Rect minBackground;
 
 SDL_Rect bgrect;
 SDL_Surface *bg;
+static SDL_Surface *backdrop_base;
 
 // draw rounded box
 // see http://lists.libsdl.org/pipermail/sdl-libsdl.org/2006-December/058868.html
@@ -170,94 +171,116 @@ static Uint8 blend_channel(Uint8 from, Uint8 to, double amount) {
 	return (Uint8)(from + (to - from) * amount);
 }
 
+static double smooth_step(double edge0, double edge1, double value) {
+	double t = (value - edge0) / (edge1 - edge0);
+	if(t < 0.0) t = 0.0;
+	if(t > 1.0) t = 1.0;
+	return t * t * (3.0 - 2.0 * t);
+}
+
 void render_backdrop(SDL_Surface *surface, Uint32 ticks) {
+	int scale = surface->h < surface->w ? surface->h : surface->w;
+	if(scale < 1) scale = 1;
 	if(surface->format->BytesPerPixel != 4) {
 		fprintf(stderr, "Unsupported screen pixel format: expected 32-bit pixels\n");
 		return;
 	}
-	if(SDL_MUSTLOCK(surface) && SDL_LockSurface(surface) < 0) {
-		fprintf(stderr, "Unable to lock screen surface: %s\n", SDL_GetError());
-		return;
+	if(backdrop_base && (backdrop_base->w != surface->w || backdrop_base->h != surface->h)) {
+		SDL_FreeSurface(backdrop_base);
+		backdrop_base = NULL;
 	}
 
-	double drift = ticks * 0.000018;
-	for(int y = 0; y < surface->h; y += 4) {
-		double ny = (double)(y + 2) / surface->h;
-		double sky_blend = ny / 0.68;
-		for(int x = 0; x < surface->w; x += 4) {
-			double nx = (double)(x + 2) / surface->w;
-			double fine = smooth_noise(nx * 25.0 + drift * 0.35, ny * 21.0, 41);
-			Uint8 red = blend_channel(5, 35, sky_blend);
-			Uint8 green = blend_channel(8, 37, sky_blend);
-			Uint8 blue = blend_channel(21, 67, sky_blend);
+	bool cached = backdrop_base && SDL_BlitSurface(backdrop_base, NULL, surface, NULL) == 0;
+	if(backdrop_base && !cached) {
+		fprintf(stderr, "Unable to restore backdrop cache: %s\n", SDL_GetError());
+	}
+	if(!cached) {
+		if(SDL_MUSTLOCK(surface) && SDL_LockSurface(surface) < 0) {
+			fprintf(stderr, "Unable to lock screen surface: %s\n", SDL_GetError());
+			return;
+		}
 
-			if(ny < 0.62) {
-				double broad = smooth_noise(nx * 3.2 + drift * 0.25, ny * 3.8, 101);
-				double middle = smooth_noise(nx * 8.5 - drift * 0.42, ny * 10.0 + drift * 0.12, 211);
-				double detail = smooth_noise(nx * 23.0 + drift * 0.75, ny * 28.0 - drift * 0.2, 307);
-				double turbulence = broad * 0.48 + middle * 0.34 + detail * 0.18;
-				double band = 0.27 + (smooth_noise(nx * 2.3 + drift * 0.08, 1.4, 419) - 0.5) * 0.24;
-				double band_width = 0.24 + broad * 0.06;
-				double band_edge = 1.0 - fabs(ny - band) / band_width;
-				double nebula = band_edge > 0.0
-					? (turbulence - 0.36) * 3.4 * band_edge : 0.0;
-				if(nebula > 0.0) {
-					double hue = smooth_noise(nx * 4.0 - drift * 0.08, ny * 5.5, 523);
-					Uint8 nebula_red = blend_channel(62, 151, hue);
-					Uint8 nebula_green = blend_channel(49, 83, hue);
-					Uint8 nebula_blue = blend_channel(145, 226, 1.0 - hue * 0.45);
-					double light = nebula * (0.24 + 0.30 * turbulence);
-					red = blend_channel(red, nebula_red, light);
-					green = blend_channel(green, nebula_green, light);
-					blue = blend_channel(blue, nebula_blue, light);
+		double drift = ticks * 0.000018;
+		for(int y = 0; y < surface->h; y += 4) {
+			double ny = (double)(y + 2) / surface->h;
+			double sky_blend = ny / 0.68;
+			for(int x = 0; x < surface->w; x += 4) {
+				double nx = (double)(x + 2) / surface->w;
+				double fine = smooth_noise(nx * 25.0 + drift * 0.35, ny * 21.0, 41);
+				Uint8 red = blend_channel(5, 35, sky_blend);
+				Uint8 green = blend_channel(8, 37, sky_blend);
+				Uint8 blue = blend_channel(21, 67, sky_blend);
+
+				if(ny < 0.62) {
+					double broad = smooth_noise(nx * 3.2 + drift * 0.25, ny * 3.8, 101);
+					double middle = smooth_noise(nx * 8.5 - drift * 0.42, ny * 10.0 + drift * 0.12, 211);
+					double detail = smooth_noise(nx * 23.0 + drift * 0.75, ny * 28.0 - drift * 0.2, 307);
+					double turbulence = broad * 0.48 + middle * 0.34 + detail * 0.18;
+					double band = 0.27 + (smooth_noise(nx * 2.3 + drift * 0.08, 1.4, 419) - 0.5) * 0.24;
+					double band_width = 0.24 + broad * 0.06;
+					double band_edge = 1.0 - fabs(ny - band) / band_width;
+					double nebula = band_edge > 0.0
+						? (turbulence - 0.36) * 3.4 * band_edge : 0.0;
+					if(nebula > 0.0) {
+						double hue = smooth_noise(nx * 4.0 - drift * 0.08, ny * 5.5, 523);
+						Uint8 nebula_red = blend_channel(62, 151, hue);
+						Uint8 nebula_green = blend_channel(49, 83, hue);
+						Uint8 nebula_blue = blend_channel(145, 226, 1.0 - hue * 0.45);
+						double light = nebula * (0.24 + 0.30 * turbulence);
+						red = blend_channel(red, nebula_red, light);
+						green = blend_channel(green, nebula_green, light);
+						blue = blend_channel(blue, nebula_blue, light);
+					}
+
+					double cloud_mass = smooth_noise(nx * 4.2 + drift * 0.42, ny * 6.0 + drift * 0.08, 631) * 0.62
+						+ smooth_noise(nx * 13.0 + drift * 0.7, ny * 19.0 - drift * 0.16, 719) * 0.38;
+					double cloud_band = 0.48 + 0.035 * (smooth_noise(nx * 3.0 + drift * 0.14, 2.0, 811) - 0.5);
+					double cloud_envelope = 1.0 - fabs(ny - cloud_band) / 0.14;
+					double cloud_density = cloud_envelope > 0.0
+						? (cloud_mass - 0.50) * 3.2 * cloud_envelope : 0.0;
+					if(cloud_density > 0.0) {
+						double amount = cloud_density * 0.42;
+						red = blend_channel(red, (Uint8)(123 + 32 * fine), amount);
+						green = blend_channel(green, (Uint8)(139 + 29 * fine), amount);
+						blue = blend_channel(blue, (Uint8)(174 + 34 * fine), amount);
+					}
 				}
 
-				double cloud_mass = smooth_noise(nx * 4.2 + drift * 0.42, ny * 6.0 + drift * 0.08, 631) * 0.62
-					+ smooth_noise(nx * 13.0 + drift * 0.7, ny * 19.0 - drift * 0.16, 719) * 0.38;
-				double cloud_band = 0.48 + 0.035 * (smooth_noise(nx * 3.0 + drift * 0.14, 2.0, 811) - 0.5);
-				double cloud_envelope = 1.0 - fabs(ny - cloud_band) / 0.14;
-				double cloud_density = cloud_envelope > 0.0
-					? (cloud_mass - 0.50) * 3.2 * cloud_envelope : 0.0;
-				if(cloud_density > 0.0) {
-					double amount = cloud_density * 0.42;
-					red = blend_channel(red, (Uint8)(123 + 32 * fine), amount);
-					green = blend_channel(green, (Uint8)(139 + 29 * fine), amount);
-					blue = blend_channel(blue, (Uint8)(174 + 34 * fine), amount);
-				}
-			}
+				double far_edge = 0.68 + (smooth_noise(nx * 3.6, 1.0, 907) - 0.5) * 0.13;
+				double middle_edge = 0.79 + (smooth_noise(nx * 5.2 + 8.0, 2.0, 1013) - 0.5) * 0.10;
+				double near_edge = 0.88 + (smooth_noise(nx * 8.0 - 3.0, 3.0, 1123) - 0.5) * 0.09;
+				double ground_noise = smooth_noise(nx * 28.0, ny * 32.0, 1237);
+				double far_cover = smooth_step(far_edge - 0.014, far_edge + 0.014, ny);
+				red = blend_channel(red, (Uint8)(35 + 17 * ground_noise), far_cover);
+				green = blend_channel(green, (Uint8)(44 + 21 * ground_noise), far_cover);
+				blue = blend_channel(blue, (Uint8)(60 + 24 * ground_noise), far_cover);
+				double middle_cover = smooth_step(middle_edge - 0.012, middle_edge + 0.012, ny);
+				red = blend_channel(red, (Uint8)(20 + 10 * ground_noise), middle_cover);
+				green = blend_channel(green, (Uint8)(31 + 15 * ground_noise), middle_cover);
+				blue = blend_channel(blue, (Uint8)(39 + 17 * ground_noise), middle_cover);
+				double near_cover = smooth_step(near_edge - 0.010, near_edge + 0.010, ny);
+				red = blend_channel(red, (Uint8)(9 + 8 * ground_noise), near_cover);
+				green = blend_channel(green, (Uint8)(17 + 10 * ground_noise), near_cover);
+				blue = blend_channel(blue, (Uint8)(25 + 12 * ground_noise), near_cover);
 
-			double far_edge = 0.68 + (smooth_noise(nx * 3.6, 1.0, 907) - 0.5) * 0.13;
-			double middle_edge = 0.79 + (smooth_noise(nx * 5.2 + 8.0, 2.0, 1013) - 0.5) * 0.10;
-			double near_edge = 0.88 + (smooth_noise(nx * 8.0 - 3.0, 3.0, 1123) - 0.5) * 0.09;
-			double ground_noise = smooth_noise(nx * 28.0, ny * 32.0, 1237);
-			if(ny > far_edge) {
-				red = (Uint8)(35 + 17 * ground_noise);
-				green = (Uint8)(44 + 21 * ground_noise);
-				blue = (Uint8)(60 + 24 * ground_noise);
-			}
-			if(ny > middle_edge) {
-				red = (Uint8)(20 + 10 * ground_noise);
-				green = (Uint8)(31 + 15 * ground_noise);
-				blue = (Uint8)(39 + 17 * ground_noise);
-			}
-			if(ny > near_edge) {
-				red = (Uint8)(9 + 8 * ground_noise);
-				green = (Uint8)(17 + 10 * ground_noise);
-				blue = (Uint8)(25 + 12 * ground_noise);
-			}
-
-			Uint32 pixel = SDL_MapRGB(surface->format, red, green, blue);
-			int block_width = surface->w - x < 4 ? surface->w - x : 4;
-			int block_height = surface->h - y < 4 ? surface->h - y : 4;
-			for(int row_index = 0; row_index < block_height; row_index++) {
-				Uint32 *row = (Uint32 *)((Uint8 *)surface->pixels + (y + row_index) * surface->pitch);
-				for(int column = 0; column < block_width; column++) {
-					row[x + column] = pixel;
+				Uint32 pixel = SDL_MapRGB(surface->format, red, green, blue);
+				int block_width = surface->w - x < 4 ? surface->w - x : 4;
+				int block_height = surface->h - y < 4 ? surface->h - y : 4;
+				for(int row_index = 0; row_index < block_height; row_index++) {
+					Uint32 *row = (Uint32 *)((Uint8 *)surface->pixels + (y + row_index) * surface->pitch);
+					for(int column = 0; column < block_width; column++) {
+						row[x + column] = pixel;
+					}
 				}
 			}
 		}
+		if(SDL_MUSTLOCK(surface)) SDL_UnlockSurface(surface);
+
+		backdrop_base = SDL_ConvertSurface(surface, surface->format, SDL_SWSURFACE);
+		if(!backdrop_base) {
+			fprintf(stderr, "Unable to cache backdrop: %s\n", SDL_GetError());
+		}
 	}
-	if(SDL_MUSTLOCK(surface)) SDL_UnlockSurface(surface);
 
 	Uint32 star_seed = 0x4f1bbcdcu;
 	for(int i = 0; i < surface->w * surface->h / 1900; i++) {
@@ -270,6 +293,57 @@ void render_backdrop(SDL_Surface *surface, Uint32 ticks) {
 		if(i % 23 == 0) filledCircleRGBA(surface, sx, sy, 3, 126, 158, 226, 13);
 		pixelRGBA(surface, sx, sy, 205, 214, 235, alpha);
 		if(i % 23 == 0) filledCircleRGBA(surface, sx, sy, 1, 237, 232, 222, alpha);
+	}
+
+	static const int camp_x_percent[] = { 12, 38, 67, 89 };
+	for(size_t i = 0; i < sizeof(camp_x_percent) / sizeof(camp_x_percent[0]); i++) {
+		int camp_x = surface->w * camp_x_percent[i] / 100;
+		double nx = (double)camp_x / surface->w;
+		double ridge = 0.68 + (smooth_noise(nx * 3.6, 1.0, 907) - 0.5) * 0.13;
+		int ground_y = surface->h * (ridge + 0.022);
+		double flicker = 0.5 + 0.5 * sin(ticks / (71.0 + i * 19) + i * 3.7);
+		int flame_x = camp_x + scale / 75;
+		int flame_y = ground_y - scale / 150;
+		Uint8 glow = (Uint8)(14 + flicker * 15);
+		filledCircleRGBA(surface, flame_x, flame_y, scale / 48, 240, 133, 71, glow);
+		filledCircleRGBA(surface, flame_x, flame_y, 2, 255, 194, 119,
+			(Uint8)(100 + flicker * 100));
+		pixelRGBA(surface, flame_x, flame_y - 2, 255, 225, 169, (Uint8)(120 + flicker * 100));
+
+		for(int person = -1; person <= 1; person += 2) {
+			int person_x = flame_x + person * scale / 55;
+			int head_y = ground_y - scale / 45;
+			filledCircleRGBA(surface, person_x, head_y, scale / 260, 20, 25, 34, 220);
+			thickLineRGBA(surface, person_x, head_y + scale / 100, person_x,
+				ground_y - 1, 1, 19, 24, 32, 230);
+			thickLineRGBA(surface, person_x, ground_y - scale / 100,
+				person_x - person * scale / 180, ground_y, 1, 19, 24, 32, 230);
+		}
+	}
+
+	for(int i = 0; i < 10; i++) {
+		unsigned int mote = (unsigned int)i * 2246822519u + 3266489917u;
+		int base_x = (mote % surface->w + ticks / (45 + i % 4 * 13)) % surface->w;
+		double nx = (double)base_x / surface->w;
+		double ridge = 0.68 + (smooth_noise(nx * 3.6, 1.0, 907) - 0.5) * 0.13;
+		int y = surface->h * (ridge + 0.035) + (int)(sin(ticks / (520.0 + i * 47) + i) * scale * 0.018);
+		filledCircleRGBA(surface, base_x, y, 1, 200, 206, 164,
+			(Uint8)(35 + 30 * (0.5 + 0.5 * sin(ticks / (230.0 + i * 31) + i))));
+	}
+
+	Uint32 meteor_period = ticks % 19000;
+	if(meteor_period < 800) {
+		double progress = meteor_period / 800.0;
+		double fade = 1.0 - progress;
+		unsigned int event_seed = ticks / 19000 * 2654435761u + 0x9e3779b9u;
+		int meteor_x = (int)(surface->w * (0.16 + (event_seed % 58) / 100.0)
+			+ progress * surface->w * 0.20);
+		int meteor_y = (int)(surface->h * (0.07 + (event_seed >> 8) % 25 / 100.0)
+			+ progress * surface->h * 0.12);
+		Uint8 alpha = (Uint8)(130 * fade);
+		thickLineRGBA(surface, meteor_x, meteor_y, meteor_x - scale / 34,
+			meteor_y - scale / 52, 2, 211, 221, 246, alpha);
+		filledCircleRGBA(surface, meteor_x, meteor_y, 2, 241, 238, 228, alpha);
 	}
 
 	unsigned int rain_seed = 0x7f4a7c15u;
@@ -465,6 +539,25 @@ void render_clock(int maxsteps, int step, bool ambient_frame) {
 		past_yday = _time->tm_yday;
 	}
 
+	SDL_Rect *clock_cards[] = { &hourBackground, &minBackground };
+	for(size_t card_index = 0; card_index < sizeof(clock_cards) / sizeof(clock_cards[0]); card_index++) {
+		SDL_Rect *card = clock_cards[card_index];
+		SDL_SetClipRect(screen, card);
+		int drops = card->w / 42;
+		for(int i = 0; i < drops; i++) {
+			Uint32 seed = (Uint32)(i + card_index * 97) * 2246822519u + 3266489917u;
+			int drop_x = card->x + seed % card->w;
+			int length = 4 + (seed >> 24) % 7;
+			int speed = 7 + (seed >> 12) % 7;
+			int drop_y = card->y
+				+ (int)((seed + SDL_GetTicks() * speed / 90) % card->h);
+			Uint8 alpha = (Uint8)(24 + (seed >> 18) % 30);
+			thickLineRGBA(screen, drop_x, drop_y, drop_x - 1, drop_y - length,
+				1, 151, 174, 211, alpha);
+		}
+	}
+	SDL_SetClipRect(screen, NULL);
+
 	// flip backbuffer
 	SDL_Flip(screen);
 
@@ -481,20 +574,13 @@ void render_animation() {
 	}
 
 	const int DURATION = 260;
+	const int FRAME_COUNT = 20;
 	int start_tick = SDL_GetTicks();
-	int end_tick = start_tick + DURATION;
-	int current_tick;
-	int frame;
-	int done = 0;
-
-	while(!done) {
-		current_tick = SDL_GetTicks();
-		if(current_tick >= end_tick) {
-			done = 1;
-			current_tick = end_tick;
-		}
-		frame = 99 * (current_tick-start_tick) / (end_tick-start_tick);
-		render_clock(100, frame, false);
+	for(int frame = 0; frame < FRAME_COUNT; frame++) {
+		render_clock(FRAME_COUNT, frame, false);
+		int elapsed = SDL_GetTicks() - start_tick;
+		int next_frame = DURATION * (frame + 1) / FRAME_COUNT;
+		if(elapsed < next_frame) SDL_Delay(next_frame - elapsed);
 	}
 }
 
@@ -728,7 +814,16 @@ int main(int argc, char** argv ) {
 	// main loop
 	bool done = false;
 	SDL_Event event;
-	SDL_TimerID timer = SDL_AddTimer(100, update_time, NULL);
+	SDL_TimerID timer = SDL_AddTimer(1000, update_time, NULL);
+	if(!timer) {
+		fprintf(stderr, "Unable to start clock timer: %s\n", SDL_GetError());
+		SDL_FreeSurface(bg);
+		if(backdrop_base) SDL_FreeSurface(backdrop_base);
+		TTF_CloseFont(font_time);
+		TTF_CloseFont(font_mode);
+		TTF_CloseFont(font_date);
+		return 1;
+	}
 
 	int mouse_x = -1;
 	int mouse_y = -1;
@@ -778,7 +873,7 @@ int main(int argc, char** argv ) {
 	SDL_RemoveTimer(timer);
 
 	SDL_FreeSurface(bg);
-	SDL_FreeSurface(screen);
+	if(backdrop_base) SDL_FreeSurface(backdrop_base);
 
 	TTF_CloseFont(font_time);
 	TTF_CloseFont(font_mode);
