@@ -222,10 +222,15 @@ static SceneWeather get_scene_weather(Uint32 ticks) {
 	scene.season[season] = 1.0 - season_blend;
 	scene.season[(season + 1) % 4] = season_blend;
 
-	Uint32 weather_elapsed = ticks % (weather_duration * weather_count);
-	int current = weather_elapsed / weather_duration;
-	int previous = (current + weather_count - 1) % weather_count;
-	Uint32 weather_phase = weather_elapsed % weather_duration;
+	Uint32 weather_slot = ticks / weather_duration;
+	Uint32 current_seed = weather_slot * 2654435761u + 0x9e3779b9u;
+	Uint32 previous_seed = (weather_slot - 1) * 2246822519u + 3266489917u;
+	int current = current_seed % weather_count;
+	int previous = previous_seed % weather_count;
+	if(previous == current) {
+		previous = (previous + 1 + (current_seed >> 8) % (weather_count - 1)) % weather_count;
+	}
+	Uint32 weather_phase = ticks % weather_duration;
 	double weather_blend = smooth_step(0.0, weather_transition, weather_phase);
 	scene.cloud = weather_levels[previous][0]
 		+ (weather_levels[current][0] - weather_levels[previous][0]) * weather_blend;
@@ -560,12 +565,14 @@ static void draw_frigate(SDL_Surface *surface, int x, int y, int size,
 
 static void render_fullscreen_event(SDL_Surface *surface, Uint32 ticks, int scale) {
 	const Uint32 cycle = 90000;
-	const Uint32 duration = 8500;
 	Uint32 slot = ticks / cycle;
-	Uint32 phase = ticks % cycle;
+	Uint32 slot_phase = ticks % cycle;
 	Uint32 seed = slot * 2654435761u + 0x9e3779b9u;
+	Uint32 duration = 6500 + (seed >> 9) % 4000;
+	Uint32 start = (seed >> 16) % (cycle - duration);
 	int kind = (seed >> 5) % 6;
-	if(phase >= duration || kind >= 4) return;
+	if(slot_phase < start || slot_phase >= start + duration || kind >= 4) return;
+	Uint32 phase = slot_phase - start;
 
 	double fade = smooth_step(0.0, 1300.0, phase)
 		* (1.0 - smooth_step(duration - 1200.0, duration, phase));
@@ -768,14 +775,16 @@ static void render_fleet_battle(SDL_Surface *surface, Uint32 ticks, int scale) {
 static void render_long_scene(SDL_Surface *surface, Uint32 ticks, int scale) {
 		const Uint32 cycle = 210000;
 		Uint32 slot = ticks / cycle;
-		Uint32 phase = ticks % cycle;
+		Uint32 slot_phase = ticks % cycle;
 		Uint32 seed = slot * 2246822519u + 3266489917u;
 		if(seed % 5 != 0) return;
 		seed ^= seed >> 15;
 		seed *= 2246822519u;
 		seed ^= seed >> 13;
 		Uint32 duration = 72000 + (seed >> 8) % 28000;
-		if(phase >= duration) return;
+		Uint32 start = (seed >> 16) % (cycle - duration);
+		if(slot_phase < start || slot_phase >= start + duration) return;
+		Uint32 phase = slot_phase - start;
 		double progress = (double)phase / duration;
 		double fade = smooth_step(0.0, 6000.0, phase)
 			* (1.0 - smooth_step(duration - 7000.0, duration, phase));
@@ -877,15 +886,17 @@ static void render_long_scene(SDL_Surface *surface, Uint32 ticks, int scale) {
 
 	static void render_rare_sky_event(SDL_Surface *surface, Uint32 ticks, int scale) {
 	const Uint32 event_cycle = 48000;
-	const Uint32 event_duration = 6800;
 	Uint32 slot = ticks / event_cycle;
-	Uint32 phase = ticks % event_cycle;
+	Uint32 slot_phase = ticks % event_cycle;
 	Uint32 seed = slot * 2246822519u + 3266489917u;
-	if(phase >= event_duration || seed % 3 != 0) return;
-
 	seed ^= seed >> 15;
 	seed *= 2246822519u;
 	seed ^= seed >> 13;
+	Uint32 event_duration = 4200 + (seed >> 8) % 3200;
+	Uint32 event_start = (seed >> 16) % (event_cycle - event_duration);
+	if(slot_phase < event_start || slot_phase >= event_start + event_duration
+		|| seed % 3 != 0) return;
+	Uint32 phase = slot_phase - event_start;
 	double progress = (double)phase / event_duration;
 	double fade = smooth_step(0.0, 350.0, phase)
 		* (1.0 - smooth_step(event_duration - 400.0, event_duration, phase));
@@ -1351,96 +1362,6 @@ static void render_long_scene(SDL_Surface *surface, Uint32 ticks, int scale) {
 	}
 }
 
-static void render_meteor(SDL_Surface *surface, Uint32 ticks, int scale) {
-	const Uint32 flight_duration = 1600;
-	const Uint32 impact_duration = 350;
-	const Uint32 event_duration = flight_duration + impact_duration;
-	Uint32 period = ticks % 19000;
-	if(period >= event_duration) return;
-
-	unsigned int seed = ticks / 19000 * 2654435761u + 0x9e3779b9u;
-	int start_x = (int)(surface->w * (0.16 + (seed % 58) / 100.0));
-	int start_y = (int)(surface->h * (0.07 + (seed >> 8) % 25 / 100.0));
-	int impact_x = start_x + surface->w / 5;
-	if(impact_x >= surface->w) impact_x = surface->w - 1;
-	double impact_nx = (double)impact_x / surface->w;
-	double ridge = 0.88 + (smooth_noise(impact_nx * 8.0 - 3.0, 3.0, 1123) - 0.5) * 0.09;
-	int impact_y = (int)(surface->h * ridge);
-	Uint32 flight_tick = period < flight_duration ? period : flight_duration;
-	double progress = (double)flight_tick / flight_duration;
-	int meteor_x = start_x + (int)((impact_x - start_x) * progress);
-	int meteor_y = start_y + (int)((impact_y - start_y) * progress);
-	Uint8 alpha = (Uint8)(150 * smooth_step(0.0, 100.0, period)
-		* (1.0 - smooth_step(flight_duration + 200.0, event_duration, period)));
-
-	if(period < flight_duration) {
-		double dx = impact_x - start_x;
-		double dy = impact_y - start_y;
-		double distance = sqrt(dx * dx + dy * dy);
-		int tail_x = meteor_x - (int)(dx / distance * scale / 7.0);
-		int tail_y = meteor_y - (int)(dy / distance * scale / 7.0);
-		int glow_width = scale / 150;
-		if(glow_width < 3) glow_width = 3;
-		int core_width = scale / 380;
-		if(core_width < 1) core_width = 1;
-		thickLineRGBA(surface, tail_x, tail_y, meteor_x, meteor_y,
-			glow_width, 255, 151, 83, (Uint8)(alpha * 0.35));
-		thickLineRGBA(surface, tail_x, tail_y, meteor_x, meteor_y,
-			core_width, 255, 224, 178, alpha);
-		filledCircleRGBA(surface, meteor_x, meteor_y, core_width + 1,
-			255, 245, 218, alpha);
-	} else {
-		double impact_progress = (double)(period - flight_duration) / impact_duration;
-		Uint8 impact_alpha = (Uint8)(210 * (1.0 - smooth_step(0.0, 1.0, impact_progress)));
-		int radius = scale / 38;
-		if(radius < 8) radius = 8;
-		filledCircleRGBA(surface, impact_x, impact_y, radius,
-			255, 162, 85, (Uint8)(impact_alpha * 0.45));
-		filledCircleRGBA(surface, impact_x, impact_y, radius / 2,
-			255, 233, 190, impact_alpha);
-		thickLineRGBA(surface, impact_x - radius, impact_y,
-			impact_x + radius, impact_y, 2, 255, 191, 119, impact_alpha);
-	}
-}
-
-static void render_foreground_battle(SDL_Surface *surface, Uint32 ticks,
-	SDL_Rect *first_card, SDL_Rect *second_card) {
-	const Uint32 cycle = 180000;
-	const Uint32 duration = 2600;
-	Uint32 phase = (ticks + 25000) % cycle;
-	if(phase >= duration) return;
-
-	double progress = (double)phase / duration;
-	double fade = smooth_step(0.0, 350.0, phase)
-		* (1.0 - smooth_step(duration - 350.0, duration, phase));
-	int size = first_card->w / 11;
-	if(size < 14) size = 14;
-	if(size > 46) size = 46;
-
-	int start_x = first_card->x + first_card->w / 2;
-	int start_y = first_card->y + first_card->h / 2;
-	int end_x = second_card->x + second_card->w / 2;
-	int end_y = second_card->y + second_card->h / 2;
-	double wave = sin(progress * 6.28318530718) * size * 0.65;
-	int x1 = start_x + (int)((end_x - start_x) * progress + wave);
-	int y1 = start_y + (int)((end_y - start_y) * progress);
-	int x2 = start_x + (int)((end_x - start_x) * (1.0 - progress) - wave);
-	int y2 = end_y + (int)((start_y - end_y) * progress);
-	Uint8 alpha = (Uint8)(190 * fade);
-
-	SDL_Rect *cards[] = { first_card, second_card };
-	for(size_t i = 0; i < sizeof(cards) / sizeof(cards[0]); i++) {
-		SDL_SetClipRect(surface, cards[i]);
-		draw_battle_ship(surface, x1, y1, size, 1, 102, 190, 225, alpha);
-		draw_battle_ship(surface, x2, y2, size * 3 / 4, -1, 231, 160, 112, alpha);
-		if(phase > 700 && phase < duration - 500) {
-			thickLineRGBA(surface, x1 + size, y1, x2 - size, y2,
-				2, 151, 211, 241, (Uint8)(alpha * 0.7));
-		}
-	}
-	SDL_SetClipRect(surface, NULL);
-}
-
 static void render_foreground_event(SDL_Surface *surface, Uint32 ticks, int scale) {
 	const Uint32 cycle = 180000;
 	const Uint32 duration = 6500;
@@ -1664,9 +1585,12 @@ void render_backdrop(SDL_Surface *surface, Uint32 ticks) {
 	for(size_t group = 0; group < sizeof(bird_group_x) / sizeof(bird_group_x[0]); group++) {
 		int bird_span = scale / 85;
 		if(bird_span < 4) bird_span = 4;
-		int travel = (int)((Uint64)ticks * surface->w / 90000);
-		int group_x = (surface->w * bird_group_x[group] / 100 + travel)
-			% (surface->w + bird_span * 5) - bird_span * 2;
+		int formation_width = 27 * bird_span;
+		int exit_margin = bird_span * 2;
+		int route_length = surface->w + formation_width + exit_margin * 2;
+		int travel = (int)((Uint64)ticks * route_length / 90000);
+		int route_start = route_length * bird_group_x[group] / 100;
+		int group_x = (route_start + travel) % route_length - exit_margin;
 		int group_y = surface->h * bird_group_y[group] / 100
 			+ (int)(sin(ticks / 1700.0 + group * 2.1) * scale * 0.008);
 		static const int formation_x[] = { 0, -3, -6, -9, -12, -15, -18, -21, -24, -27 };
@@ -1674,7 +1598,8 @@ void render_backdrop(SDL_Surface *surface, Uint32 ticks) {
 		for(int bird = 0; bird < 10; bird++) {
 			int bird_x = group_x + formation_x[bird] * bird_span;
 			int bird_y = group_y + formation_y[bird] * bird_span;
-			int flap = (int)((0.5 + 0.5 * sin(ticks / 260.0 + group * 1.8 + bird)) * (bird_span / 2));
+			int flap = (int)((0.5 + 0.5 * sin(ticks / 170.0 + group * 1.8 + bird))
+				* (bird_span + 1));
 			draw_bird(surface, bird_x, bird_y, bird_span, flap);
 		}
 	}
@@ -1960,9 +1885,7 @@ void render_clock(int maxsteps, int step, bool ambient_frame) {
 		}
 	}
 	SDL_SetClipRect(screen, NULL);
-	render_foreground_battle(screen, SDL_GetTicks(), &hourBackground, &minBackground);
 	int scene_scale = screen->h < screen->w ? screen->h : screen->w;
-	render_meteor(screen, SDL_GetTicks(), scene_scale);
 	render_foreground_event(screen, SDL_GetTicks(), scene_scale);
 
 	// flip backbuffer
@@ -2215,7 +2138,7 @@ int main(int argc, char** argv ) {
 	cardrect.w = rectsize - 2 * border_width;
 	cardrect.h = rectsize - 2 * border_width;
 	int inner_radius = radius > border_width ? radius - border_width : 1;
-	fill_rounded_box_b(bg, &cardrect, inner_radius, BACKGROUND_COLOR, 218);
+	fill_rounded_box_b(bg, &cardrect, inner_radius, BACKGROUND_COLOR, 190);
 
 	// draw current time
 	render_clock(20, 19, false);
