@@ -53,6 +53,9 @@ static int date_surface_yday = -1;
 
 int width = DEFAULT_WIDTH;
 int height = DEFAULT_HEIGHT;
+static const Uint32 AMBIENT_FRAME_INTERVAL = 100;
+static const int MAX_RAIN_DROPS = 1200;
+static bool profile_rendering = false;
 
 TTF_Font *font_time = NULL;
 TTF_Font *font_mode = NULL;
@@ -1825,6 +1828,7 @@ void render_backdrop(SDL_Surface *surface, Uint32 ticks) {
 	double storm_strength = smooth_step(0.25, 0.75, weather.lightning);
 	int rain_count = (int)(surface->w * surface->h / 1650.0 * weather.rain
 		* (1.0 + storm_strength * 2.0));
+	if(rain_count > MAX_RAIN_DROPS) rain_count = MAX_RAIN_DROPS;
 	for(int i = 0; i < rain_count; i++) {
 		rain_seed = rain_seed * 1664525u + 1013904223u;
 		int start_x = rain_seed % surface->w;
@@ -1987,6 +1991,8 @@ void render_clock(int maxsteps, int step, bool ambient_frame) {
 	static const int offset_y[] = { 0, -1, -1, 0, 1, 1, 0, -1 };
 	int phase, new_burnin_x, new_burnin_y;
 	bool moved = false;
+	Uint32 frame_start = profile_rendering ? SDL_GetTicks() : 0;
+	Uint32 backdrop_elapsed = 0;
 
 	time(&rawtime);
 	_time = localtime(&rawtime);
@@ -2003,7 +2009,9 @@ void render_clock(int maxsteps, int step, bool ambient_frame) {
 		moved = true;
 	}
 	if(moved || ambient_frame) {
+		Uint32 backdrop_start = profile_rendering ? SDL_GetTicks() : 0;
 		render_backdrop(screen, SDL_GetTicks());
+		if(profile_rendering) backdrop_elapsed = SDL_GetTicks() - backdrop_start;
 		past_h = past_m = -1;
 	}
 	bool redraw = moved || ambient_frame;
@@ -2087,6 +2095,13 @@ void render_clock(int maxsteps, int step, bool ambient_frame) {
 
 	// flip backbuffer
 	SDL_Flip(screen);
+	if(profile_rendering) {
+		Uint32 frame_elapsed = SDL_GetTicks() - frame_start;
+		if(frame_elapsed >= 50) {
+			fprintf(stderr, "Gluqlo slow frame: %u ms (backdrop: %u ms)\n",
+				frame_elapsed, backdrop_elapsed);
+		}
+	}
 
 	if(moved || step == maxsteps-1) {
 		past_h = _time->tm_hour;
@@ -2134,13 +2149,14 @@ Uint32 update_time(Uint32 interval, void *param) {
 		SDL_PushEvent(&e);
 	}
 
-	return 100;
+	return AMBIENT_FRAME_INTERVAL;
 }
 
 int main(int argc, char** argv ) {
 	char *wid_env;
 	static char sdlwid[100];
 	double display_scale_factor = 1;
+	profile_rendering = getenv("GLUQLO_PROFILE") != NULL;
 
 	Uint32 wid = 0;
 	Display *display;
@@ -2343,7 +2359,7 @@ int main(int argc, char** argv ) {
 	// main loop
 	bool done = false;
 	SDL_Event event;
-	SDL_TimerID timer = SDL_AddTimer(100, update_time, NULL);
+	SDL_TimerID timer = SDL_AddTimer(AMBIENT_FRAME_INTERVAL, update_time, NULL);
 	if(!timer) {
 		fprintf(stderr, "Unable to start clock timer: %s\n", SDL_GetError());
 		SDL_FreeSurface(bg);
