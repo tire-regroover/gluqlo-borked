@@ -1984,6 +1984,7 @@ void render_digits(SDL_Surface *surface, SDL_Rect *background, char digits[], ch
 }
 
 void render_clock(int maxsteps, int step, bool ambient_frame) {
+	static Uint32 last_profile_report;
 	char buffer[3], buffer2[3];
 	struct tm *_time;
 	time_t rawtime;
@@ -2097,9 +2098,10 @@ void render_clock(int maxsteps, int step, bool ambient_frame) {
 	SDL_Flip(screen);
 	if(profile_rendering) {
 		Uint32 frame_elapsed = SDL_GetTicks() - frame_start;
-		if(frame_elapsed >= 50) {
+		if(frame_elapsed >= 50 && frame_start - last_profile_report >= 1000) {
 			fprintf(stderr, "Gluqlo slow frame: %u ms (backdrop: %u ms)\n",
 				frame_elapsed, backdrop_elapsed);
+			last_profile_report = frame_start;
 		}
 	}
 
