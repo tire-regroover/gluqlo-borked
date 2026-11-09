@@ -45,7 +45,6 @@ bool animate = true;
 bool anykeyclose = false;
 
 int past_h = -1, past_m = -1, past_yday = -1;
-int queued_minute = -1;
 int burnin_x = 0, burnin_y = 0;
 int date_y = 0;
 static SDL_Surface *date_surface_cache;
@@ -53,7 +52,7 @@ static int date_surface_yday = -1;
 
 int width = DEFAULT_WIDTH;
 int height = DEFAULT_HEIGHT;
-static const Uint32 AMBIENT_FRAME_INTERVAL = 33;
+static const Uint32 AMBIENT_FRAME_INTERVAL = 100;
 static const int MAX_RAIN_DROPS = 1200;
 static bool profile_rendering = false;
 
@@ -1862,32 +1861,32 @@ void render_backdrop(SDL_Surface *surface, Uint32 ticks) {
 
 
 void blit_digits(SDL_Surface *surface, SDL_Rect *rect, int spc, char digits[], SDL_Color color) {
-	int min_x, max_x, min_y, max_y, advance;
-	int adjust_x = (digits[0] == '1') ? 2.5 * spc : 0; // special case
-	int center_x = rect->x + rect->w / 2 - adjust_x;
-
 	SDL_Surface *glyph;
 	SDL_Rect coords;
 
 	if(digits[1]) {
-		// first digit
-		TTF_GlyphMetrics(font_time, digits[0], &min_x, &max_x, &min_y, &max_y, &advance);
-		glyph = TTF_RenderGlyph_Blended(font_time, digits[0], color);
-		coords.x = center_x - max_x + min_x - spc - (adjust_x ? spc : 0);
-		coords.y = rect->y + (rect->h - glyph->h) / 2;
-		SDL_BlitSurface(glyph, 0, surface, &coords);
-		SDL_FreeSurface(glyph);
-		// second digit
-		TTF_GlyphMetrics(font_time, digits[1], &min_x, &max_x, &min_y, &max_y, &advance);
-		glyph = TTF_RenderGlyph_Blended(font_time, digits[1], color);
-		coords.y = rect->y + (rect->h - glyph->h) / 2;
-		coords.x = center_x + spc / 2;
-		SDL_BlitSurface(glyph, 0, surface, &coords);
-		SDL_FreeSurface(glyph);
+		int gap = spc + spc / 2;
+		SDL_Surface *first_glyph = TTF_RenderGlyph_Blended(font_time, digits[0], color);
+		SDL_Surface *second_glyph = TTF_RenderGlyph_Blended(font_time, digits[1], color);
+		if(!first_glyph || !second_glyph) {
+			fprintf(stderr, "Unable to render clock digits: %s\n", TTF_GetError());
+			if(first_glyph) SDL_FreeSurface(first_glyph);
+			if(second_glyph) SDL_FreeSurface(second_glyph);
+			return;
+		}
+		int total_width = first_glyph->w + gap + second_glyph->w;
+		coords.x = rect->x + (rect->w - total_width) / 2;
+		coords.y = rect->y + (rect->h - first_glyph->h) / 2;
+		SDL_BlitSurface(first_glyph, 0, surface, &coords);
+		coords.x += first_glyph->w + gap;
+		SDL_FreeSurface(first_glyph);
+		coords.y = rect->y + (rect->h - second_glyph->h) / 2;
+		SDL_BlitSurface(second_glyph, 0, surface, &coords);
+		SDL_FreeSurface(second_glyph);
 	} else {
 		// single digit
 		glyph = TTF_RenderGlyph_Blended(font_time, digits[0], color);
-		coords.x = center_x - glyph->w / 2;
+		coords.x = rect->x + (rect->w - glyph->w) / 2;
 		coords.y = rect->y + (rect->h - glyph->h) / 2;
 		SDL_BlitSurface(glyph, 0, surface, &coords);
 		SDL_FreeSurface(glyph);
@@ -1924,18 +1923,27 @@ void render_digits(SDL_Surface *surface, SDL_Rect *background, char digits[], ch
 		return;
 	}
 
-	// blit upper halves of current digits
-	rect.x = background->x;
-	rect.y = background->y;
-	rect.w = background->w;
-	rect.h = background->h/2;
+	// Rebuild the card each frame because the back buffer is not preserved by SDL_Flip.
+	rect = *background;
 	SDL_SetClipRect(surface, &rect);
 	SDL_BlitSurface(bg, 0, surface, &rect);
+	rect.h = background->h / 2;
+	SDL_SetClipRect(surface, &rect);
 	blit_digits(surface, background, spc, digits, FONT_COLOR);
 	SDL_SetClipRect(surface, NULL);
 
 	int halfsteps = maxsteps / 2;
 	int upperhalf = (step+1) <= halfsteps;
+	if(upperhalf) {
+		rect.x = background->x;
+		rect.y = background->y + background->h / 2;
+		rect.w = background->w;
+		rect.h = background->h - background->h / 2;
+		SDL_SetClipRect(surface, &rect);
+		blit_digits(surface, background, spc, prevdigits, FONT_COLOR);
+		SDL_SetClipRect(surface, NULL);
+	}
+
 	if(upperhalf) {
 		scale = 1.0 - (1.0 * step) / (halfsteps - 1);
 		intensity = 1.0 - (1.0 * step) / (halfsteps - 1);
@@ -2013,15 +2021,21 @@ void render_clock(int maxsteps, int step, bool ambient_frame) {
 		Uint32 backdrop_start = profile_rendering ? SDL_GetTicks() : 0;
 		render_backdrop(screen, SDL_GetTicks());
 		if(profile_rendering) backdrop_elapsed = SDL_GetTicks() - backdrop_start;
-		past_h = past_m = -1;
 	}
-	bool redraw = moved || ambient_frame;
-	int render_steps = moved ? 20 : maxsteps;
-	int render_step = moved ? 19 : step;
+	bool time_changed = _time->tm_hour != past_h || _time->tm_min != past_m;
+	bool redraw = ambient_frame || (moved && !time_changed);
+	int render_steps = redraw ? 20 : maxsteps;
+	int render_step = redraw ? 19 : step;
 
 	// draw hours
-	if(_time->tm_hour != past_h || redraw) {
+	if(_time->tm_hour != past_h || redraw || moved) {
 		int h = twentyfourh ? _time->tm_hour : (_time->tm_hour + 11) % 12 + 1;
+		int hour_steps = render_steps;
+		int hour_step = render_step;
+		if(moved && _time->tm_hour == past_h) {
+			hour_steps = 20;
+			hour_step = 19;
+		}
 		if(leadingzero) {
 			snprintf(buffer, 3, "%02d", h);
 			snprintf(buffer2, 3, "%02d", redraw ? h : past_h);
@@ -2029,7 +2043,7 @@ void render_clock(int maxsteps, int step, bool ambient_frame) {
 			snprintf(buffer, 3, "%d", h);
 			snprintf(buffer2, 3, "%d", redraw ? h : past_h);
 		}
-		render_digits(screen, &hourBackground, buffer, buffer2, render_steps, render_step);
+		render_digits(screen, &hourBackground, buffer, buffer2, hour_steps, hour_step);
 		// draw am/pm
 		if(!twentyfourh) render_ampm(screen, &hourBackground, _time->tm_hour >= 12);
 	}
@@ -2054,7 +2068,7 @@ void render_clock(int maxsteps, int step, bool ambient_frame) {
 			date_surface_yday = _time->tm_yday;
 		}
 	}
-	if((redraw || _time->tm_yday != past_yday)
+	if((redraw || moved || _time->tm_yday != past_yday)
 		&& date_surface_cache && date_surface_yday == _time->tm_yday) {
 		SDL_Rect date_coords;
 		date_coords.x = (screen->w - date_surface_cache->w) / 2 + burnin_x;
@@ -2105,7 +2119,7 @@ void render_clock(int maxsteps, int step, bool ambient_frame) {
 		}
 	}
 
-	if(moved || step == maxsteps-1) {
+	if(render_step == render_steps - 1) {
 		past_h = _time->tm_hour;
 		past_m = _time->tm_min;
 	}
@@ -2130,30 +2144,16 @@ void render_animation() {
 
 Uint32 update_time(Uint32 interval, void *param) {
 	SDL_Event e;
-	time_t rawtime;
-	struct tm *time_i;
-	int event_code = -1;
-
-	time(&rawtime);
-	time_i = localtime(&rawtime);
-
-	if(time_i->tm_min != past_m && time_i->tm_min != queued_minute) {
-		queued_minute = time_i->tm_min;
-		event_code = 0;
-	} else if(time_i->tm_min == past_m) {
-		SDL_Event pending_event;
-		int pending = SDL_PeepEvents(&pending_event, 1, SDL_PEEKEVENT,
-			SDL_EVENTMASK(SDL_USEREVENT));
-		if(pending < 0) {
-			fprintf(stderr, "Unable to check pending clock events: %s\n", SDL_GetError());
-			return interval;
-		}
-		if(pending == 0) event_code = 1;
+	SDL_Event pending_event;
+	int pending = SDL_PeepEvents(&pending_event, 1, SDL_PEEKEVENT,
+		SDL_EVENTMASK(SDL_USEREVENT));
+	if(pending < 0) {
+		fprintf(stderr, "Unable to check pending clock events: %s\n", SDL_GetError());
+		return interval;
 	}
-
-	if(event_code >= 0) {
+	if(pending == 0) {
 		e.type = SDL_USEREVENT;
-		e.user.code = event_code;
+		e.user.code = 0;
 		e.user.data1 = NULL;
 		e.user.data2 = NULL;
 		if(SDL_PushEvent(&e) < 0) {
@@ -2389,12 +2389,20 @@ int main(int argc, char** argv ) {
 	while(!done && SDL_WaitEvent(&event)) {
 		switch(event.type) {
 			case SDL_USEREVENT:
-				if(event.user.code == 1) {
-					render_clock(20, 19, true);
-				} else {
+			{
+				time_t rawtime;
+				struct tm current_time;
+				time(&rawtime);
+				localtime_r(&rawtime, &current_time);
+				bool time_changed = current_time.tm_hour != past_h
+					|| current_time.tm_min != past_m;
+				if(time_changed) {
 					render_animation();
+				} else {
+					render_clock(20, 19, true);
 				}
 				break;
+			}
 			case SDL_KEYDOWN:
 				if(anykeyclose){
 					done = true;
