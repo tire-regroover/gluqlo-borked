@@ -53,7 +53,7 @@ static int date_surface_yday = -1;
 
 int width = DEFAULT_WIDTH;
 int height = DEFAULT_HEIGHT;
-static const Uint32 AMBIENT_FRAME_INTERVAL = 100;
+static const Uint32 AMBIENT_FRAME_INTERVAL = 33;
 static const int MAX_RAIN_DROPS = 1200;
 static bool profile_rendering = false;
 
@@ -2132,26 +2132,36 @@ Uint32 update_time(Uint32 interval, void *param) {
 	SDL_Event e;
 	time_t rawtime;
 	struct tm *time_i;
+	int event_code = -1;
 
 	time(&rawtime);
 	time_i = localtime(&rawtime);
 
 	if(time_i->tm_min != past_m && time_i->tm_min != queued_minute) {
 		queued_minute = time_i->tm_min;
-		e.type = SDL_USEREVENT;
-		e.user.code = 0;
-		e.user.data1 = NULL;
-		e.user.data2 = NULL;
-		SDL_PushEvent(&e);
+		event_code = 0;
 	} else if(time_i->tm_min == past_m) {
-		e.type = SDL_USEREVENT;
-		e.user.code = 1;
-		e.user.data1 = NULL;
-		e.user.data2 = NULL;
-		SDL_PushEvent(&e);
+		SDL_Event pending_event;
+		int pending = SDL_PeepEvents(&pending_event, 1, SDL_PEEKEVENT,
+			SDL_EVENTMASK(SDL_USEREVENT));
+		if(pending < 0) {
+			fprintf(stderr, "Unable to check pending clock events: %s\n", SDL_GetError());
+			return interval;
+		}
+		if(pending == 0) event_code = 1;
 	}
 
-	return AMBIENT_FRAME_INTERVAL;
+	if(event_code >= 0) {
+		e.type = SDL_USEREVENT;
+		e.user.code = event_code;
+		e.user.data1 = NULL;
+		e.user.data2 = NULL;
+		if(SDL_PushEvent(&e) < 0) {
+			fprintf(stderr, "Unable to queue clock event: %s\n", SDL_GetError());
+		}
+	}
+
+	return interval;
 }
 
 int main(int argc, char** argv ) {
