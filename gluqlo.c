@@ -22,12 +22,14 @@
 #include <string.h>
 #include <X11/Xlib.h>
 #include <time.h>
+#include <math.h>
 
-#include "SDL.h"
-#include "SDL_ttf.h"
-#include "SDL_syswm.h"
-#include "SDL_gfxPrimitives.h"
-#include "SDL_rotozoom.h"
+#include <stdbool.h>
+#include <SDL2/SDL.h>
+#include <SDL2/SDL_ttf.h>
+#include <SDL2/SDL_syswm.h>
+#include <SDL2/SDL2_gfxPrimitives.h>
+#include <SDL2/SDL2_rotozoom.h>
 
 #ifndef FONT
 #define FONT "/usr/share/gluqlo/gluqlo.ttf"
@@ -46,16 +48,48 @@ bool anykeyclose = false;
 int past_h = -1, past_m = -1, past_yday = -1;
 int burnin_x = 0, burnin_y = 0;
 int date_y = 0;
+static SDL_Surface *date_surface_cache;
+static int date_surface_yday = -1;
 
 int width = DEFAULT_WIDTH;
 int height = DEFAULT_HEIGHT;
+static const Uint32 AMBIENT_FRAME_INTERVAL = 100;
+static const int MAX_RAIN_DROPS = 1200;
+static const int MAX_METEORS = 30;
+static const int MAX_FIREFLIES = 100;
+static const int MAX_SATELLITES = 5;
+static bool profile_rendering = false;
+static bool show_meteors = true;
+static bool show_solar_flares = true;
+static bool show_moon_phases = true;
+static bool show_constellations = true;
+static bool show_fireflies = true;
+static bool show_ocean_waves = true;
+static bool show_sandstorm = false;
+static bool show_volcano = false;
+static bool show_rainbow = false;
+static bool show_satellites = true;
+
+// Function declarations for visual effects
+void render_meteor_shower(SDL_Renderer *renderer, Uint32 ticks, int scale);
+void render_solar_flares(SDL_Renderer *renderer, Uint32 ticks, int scale);
+void render_moon_phases(SDL_Renderer *renderer, Uint32 ticks, int scale);
+void render_constellations(SDL_Renderer *renderer, Uint32 ticks, int scale);
+void render_fireflies(SDL_Renderer *renderer, Uint32 ticks, int scale);
+void render_ocean_waves(SDL_Renderer *renderer, Uint32 ticks, int scale);
+void render_sandstorm(SDL_Renderer *renderer, Uint32 ticks, int scale);
+void render_volcanic_eruption(SDL_Renderer *renderer, Uint32 ticks, int scale);
+void render_rainbow(SDL_Renderer *renderer, Uint32 ticks, int scale);
+void render_satellite_trails(SDL_Renderer *renderer, Uint32 ticks, int scale);
 
 TTF_Font *font_time = NULL;
 TTF_Font *font_mode = NULL;
 TTF_Font *font_date = NULL;
 
-const SDL_Color FONT_COLOR = { 0xb7, 0xb7, 0xb7 };
-const SDL_Color BACKGROUND_COLOR = { 0x0f, 0x0f, 0x0f };
+const SDL_Color FONT_COLOR = { 0xda, 0xda, 0xe2 };
+const SDL_Color DATE_COLOR = { 0xc6, 0xc2, 0xcf };
+const SDL_Color BACKGROUND_COLOR = { 0x12, 0x14, 0x1d };
+const SDL_Color CARD_BORDER_COLOR = { 0x37, 0x3d, 0x4e };
 
 SDL_Surface *screen;
 
@@ -64,11 +98,12 @@ SDL_Rect minBackground;
 
 SDL_Rect bgrect;
 SDL_Surface *bg;
+static SDL_Surface *backdrop_base;
 
 // draw rounded box
 // see http://lists.libsdl.org/pipermail/sdl-libsdl.org/2006-December/058868.html
-void fill_rounded_box_b(SDL_Surface* dst, SDL_Rect *coords, int r, SDL_Color color) {
-	Uint32 pixcolor = SDL_MapRGB(dst->format, color.r, color.g, color.b);
+void fill_rounded_box_b(SDL_Surface* dst, SDL_Rect *coords, int r, SDL_Color color, Uint8 alpha) {
+	Uint32 pixcolor = SDL_MapRGBA(dst->format, color.r, color.g, color.b, alpha);
 
 	int i, j;
 	int rpsqrt2 = (int) (r / sqrt(2));
@@ -139,480 +174,417 @@ void render_ampm(SDL_Surface *surface, SDL_Rect *rect, int pm) {
 	SDL_FreeSurface(ampm);
 }
 
-
-
-void blit_digits(SDL_Surface *surface, SDL_Rect *rect, int spc, char digits[], SDL_Color color) {
-	int min_x, max_x, min_y, max_y, advance;
-	int adjust_x = (digits[0] == '1') ? 2.5 * spc : 0; // special case
-	int center_x = rect->x + rect->w / 2 - adjust_x;
-
-	SDL_Surface *glyph;
-	SDL_Rect coords;
-
-	if(digits[1]) {
-		// first digit
-		TTF_GlyphMetrics(font_time, digits[0], &min_x, &max_x, &min_y, &max_y, &advance);
-		glyph = TTF_RenderGlyph_Blended(font_time, digits[0], color);
-		coords.x = center_x - max_x + min_x - spc - (adjust_x ? spc : 0);
-		coords.y = rect->y + (rect->h - glyph->h) / 2;
-		SDL_BlitSurface(glyph, 0, surface, &coords);
-		SDL_FreeSurface(glyph);
-		// second digit
-		TTF_GlyphMetrics(font_time, digits[1], &min_x, &max_x, &min_y, &max_y, &advance);
-		glyph = TTF_RenderGlyph_Blended(font_time, digits[1], color);
-		coords.y = rect->y + (rect->h - glyph->h) / 2;
-		coords.x = center_x + spc / 2;
-		SDL_BlitSurface(glyph, 0, surface, &coords);
-		SDL_FreeSurface(glyph);
-	} else {
-		// single digit
-		glyph = TTF_RenderGlyph_Blended(font_time, digits[0], color);
-		coords.x = center_x - glyph->w / 2;
-		coords.y = rect->y + (rect->h - glyph->h) / 2;
-		SDL_BlitSurface(glyph, 0, surface, &coords);
-		SDL_FreeSurface(glyph);
-	}
+static double hash_noise(int x, int y, Uint32 seed) {
+	Uint32 value = (Uint32)x * 374761393u + (Uint32)y * 668265263u + seed * 2246822519u;
+	value = (value ^ (value >> 13)) * 1274126177u;
+	value ^= value >> 16;
+	return value / 4294967295.0;
 }
 
-
-void render_digits(SDL_Surface *surface, SDL_Rect *background, char digits[], char prevdigits[], int maxsteps, int step) {
-	SDL_Rect rect, dstrect;
-	SDL_Color color;
-	double scale;
-	Uint8 c;
-
-	// int spc = surface->h * .0125;
-	bool is_h = surface->h < surface->w;
-	int spc = is_h ? surface->h * .0125 : surface->w * .0125;
-
-	// blit upper halves of current digits
-	rect.x = background->x;
-	rect.y = background->y;
-	rect.w = background->w;
-	rect.h = background->h/2;
-	SDL_SetClipRect(surface, &rect);
-	SDL_BlitSurface(bg, 0, surface, &rect);
-	blit_digits(surface, background, spc, digits, FONT_COLOR);
-	SDL_SetClipRect(surface, NULL);
-
-	int halfsteps = maxsteps / 2;
-	int upperhalf = (step+1) <= halfsteps;
-	if(upperhalf) {
-		scale = 1.0 - (1.0 * step) / (halfsteps - 1);
-		c = 0xb7 - 0xb7 * (1.0 * step) / (halfsteps - 1);
-	} else {
-		scale = ((1.0 * step) - halfsteps + 1) / halfsteps;
-		c = 0xb7 * ((1.0 * step) - halfsteps + 1) / halfsteps;
-	}
-	color.r = color.g = color.b = c;
-
-	// create surface to scale from filled background surface
-	SDL_Surface *bgcopy = SDL_ConvertSurface(bg, bg->format, bg->flags);
-	rect.x = 0;
-	rect.y = 0;
-	rect.w = bgcopy->w;
-	rect.h = bgcopy->h;
-	blit_digits(bgcopy, &rect, spc, upperhalf ? prevdigits : digits, color);
-
-	// scale and blend it to dest
-	SDL_Surface *scaled = zoomSurface(bgcopy, 1.0, scale, 1);
-	rect.x = 0;
-	rect.y = upperhalf ? 0 : scaled->h / 2;
-	rect.w = scaled->w;
-	rect.h = scaled->h / 2;
-	dstrect.x = background->x;
-	dstrect.y = background->y + ( upperhalf ? ((background->h - scaled->h) / 2) : background->h / 2);
-	dstrect.w = rect.w;
-	dstrect.h = rect.h;
-	SDL_SetClipRect(surface, &dstrect);
-	SDL_BlitSurface(scaled, &rect, surface, &dstrect);
-	SDL_SetClipRect(surface, NULL);
-	SDL_FreeSurface(scaled);
-	SDL_FreeSurface(bgcopy);
-
-	if(!animate) return;
-	// draw divider
-	rect.h = (is_h ? surface->h : surface->w) * 0.005;
-	rect.w = background->w;
-	rect.x = background->x;
-	rect.y = background->y + (background->h - rect.h) / 2;
-	SDL_FillRect(surface, &rect, SDL_MapRGB(surface->format, 0, 0, 0));
-	rect.y += rect.h;
-	rect.h = 1;
-	SDL_FillRect(surface, &rect, SDL_MapRGB(surface->format, 0x1a, 0x1a, 0x1a));
+static double smooth_noise(double x, double y, Uint32 seed) {
+	int x0 = (int)floor(x);
+	int y0 = (int)floor(y);
+	double fx = x - x0;
+	double fy = y - y0;
+	fx = fx * fx * (3.0 - 2.0 * fx);
+	fy = fy * fy * (3.0 - 2.0 * fy);
+	double top = hash_noise(x0, y0, seed) * (1.0 - fx)
+		+ hash_noise(x0 + 1, y0, seed) * fx;
+	double bottom = hash_noise(x0, y0 + 1, seed) * (1.0 - fx)
+		+ hash_noise(x0 + 1, y0 + 1, seed) * fx;
+	return top * (1.0 - fy) + bottom * fy;
 }
 
-void render_clock(int maxsteps, int step) {
-	char buffer[3], buffer2[3];
-	struct tm *_time;
-	time_t rawtime;
-	static const int offset_x[] = { -1, 0, 1, 1, 1, 0, -1, -1 };
-	static const int offset_y[] = { 0, -1, -1, 0, 1, 1, 0, -1 };
-	int phase, new_burnin_x, new_burnin_y;
-	bool moved = false;
-
-	time(&rawtime);
-	_time = localtime(&rawtime);
-	phase = (rawtime / 300) % 8;
-	new_burnin_x = offset_x[phase] * (screen->w / 80);
-	new_burnin_y = offset_y[phase] * (screen->h / 80);
-	if(new_burnin_x != burnin_x || new_burnin_y != burnin_y) {
-		hourBackground.x += new_burnin_x - burnin_x;
-		hourBackground.y += new_burnin_y - burnin_y;
-		minBackground.x += new_burnin_x - burnin_x;
-		minBackground.y += new_burnin_y - burnin_y;
-		burnin_x = new_burnin_x;
-		burnin_y = new_burnin_y;
-		SDL_FillRect(screen, NULL, SDL_MapRGB(screen->format, 0, 0, 0));
-		past_h = past_m = -1;
-		moved = true;
-	}
-	int render_steps = moved ? 20 : maxsteps;
-	int render_step = moved ? 19 : step;
-
-	// draw hours
-	if(_time->tm_hour != past_h) {
-		int h = twentyfourh ? _time->tm_hour : (_time->tm_hour + 11) % 12 + 1;
-		if(leadingzero) {
-			snprintf(buffer, 3, "%02d", h);
-			snprintf(buffer2, 3, "%02d", past_h);
-		} else {
-			snprintf(buffer, 3, "%d", h);
-			snprintf(buffer2, 3, "%d", past_h);
-		}
-		render_digits(screen, &hourBackground, buffer, buffer2, render_steps, render_step);
-		// draw am/pm
-		if(!twentyfourh) render_ampm(screen, &hourBackground, _time->tm_hour >= 12);
-	}
-
-	// draw minutes
-	if(_time->tm_min != past_m) {
-		snprintf(buffer, 3, "%02d", _time->tm_min);
-		snprintf(buffer2, 3, "%02d", past_m);
-		render_digits(screen, &minBackground, buffer, buffer2, render_steps, render_step);
-	}
-
-	if(_time->tm_yday != past_yday || moved) {
-		char date[128];
-		SDL_Surface *date_surface;
-		SDL_Rect date_coords;
-		strftime(date, sizeof(date), "%A, %B", _time);
-		snprintf(date + strlen(date), sizeof(date) - strlen(date), " %d, %d", _time->tm_mday, _time->tm_year + 1900);
-		date_surface = TTF_RenderText_Blended(font_date, date, FONT_COLOR);
-		SDL_Rect date_background;
-		date_background.x = 0;
-		date_background.y = date_y + burnin_y;
-		date_background.w = screen->w;
-		date_background.h = TTF_FontHeight(font_date);
-		SDL_FillRect(screen, &date_background, SDL_MapRGB(screen->format, 0, 0, 0));
-		date_coords.x = (screen->w - date_surface->w) / 2 + burnin_x;
-		date_coords.y = date_y + burnin_y;
-		SDL_BlitSurface(date_surface, NULL, screen, &date_coords);
-		SDL_FreeSurface(date_surface);
-		past_yday = _time->tm_yday;
-	}
-
-	// flip backbuffer
-	SDL_Flip(screen);
-
-	if(moved || step == maxsteps-1) {
-		past_h = _time->tm_hour;
-		past_m = _time->tm_min;
-	}
+static Uint8 blend_channel(Uint8 from, Uint8 to, double amount) {
+	if(amount < 0.0) amount = 0.0;
+	if(amount > 1.0) amount = 1.0;
+	return (Uint8)(from + (to - from) * amount);
 }
 
-void render_animation() {
-	if(!animate) {
-		render_clock(20, 19);
-		return;
-	}
-
-	const int DURATION = 260;
-	int start_tick = SDL_GetTicks();
-	int end_tick = start_tick + DURATION;
-	int current_tick;
-	int frame;
-	int done = 0;
-
-	while(!done) {
-		current_tick = SDL_GetTicks();
-		if(current_tick >= end_tick) {
-			done = 1;
-			current_tick = end_tick;
-		}
-		frame = 99 * (current_tick-start_tick) / (end_tick-start_tick);
-		render_clock(100, frame);
-	}
+static double smooth_step(double edge0, double edge1, double value) {
+	double t = (value - edge0) / (edge1 - edge0);
+	if(t < 0.0) t = 0.0;
+	if(t > 1.0) t = 1.0;
+	return t * t * (3.0 - 2.0 * t);
 }
 
-Uint32 update_time(Uint32 interval, void *param) {
-	SDL_Event e;
-	time_t rawtime;
-	struct tm *time_i;
+typedef struct {
+	double season[4];
+	double cloud;
+	double rain;
+	double snow;
+	double sunshine;
+	double fog;
+	double wind;
+	double lightning;
+	double aurora;
+	double palette[3];
+} SceneWeather;
 
-	time(&rawtime);
-	time_i = localtime(&rawtime);
-
-	if(time_i->tm_min != past_m) {
-		e.type = SDL_USEREVENT;
-		e.user.code = 0;
-		e.user.data1 = NULL;
-		e.user.data2 = NULL;
-		SDL_PushEvent(&e);
-		interval = 1000 * (60 - time_i->tm_sec) - 250;
-	} else {
-		interval = 250;
-	}
-
-	return interval;
-}
-
-int main(int argc, char** argv ) {
-	char *wid_env;
-	static char sdlwid[100];
-	double display_scale_factor = 1;
-
-	Uint32 wid = 0;
-	Display *display;
-	XWindowAttributes windowAttributes;
-
-	for(int i = 1; i < argc; i++) {
-		if(strcmp("--help",argv[i]) == 0 || strcmp("-help", argv[i]) == 0) {
-			printf("Usage: %s [OPTION...]\nOptions:\n", argv[0]);
-			printf("  -help\t\tDisplay this\n");
-			printf("  -root, -f\tFullscreen\n");
-			printf("  -noflip\tDisable the flip animation (change time in one frame)\n");
-			printf("  -anykeyclose\tClose app when mouse move or any key pressed\n");
-			printf("  -ampm\t\tUse 12-hour clock format (AM/PM)\n");
-			printf("  -leadingzero\tAlways display hour with two digits\n");
-			printf("  -w\t\tCustom width\n");
-			printf("  -h\t\tCustom height\n");
-			printf("  -r\t\tCustom resolution in WxH format\n");
-			printf("  -s\t\tCustom display scale factor\n");
-			return 0;
-		} else if(strcmp("-root", argv[i]) == 0 || strcmp("-f", argv[i]) == 0 || strcmp("--fullscreen", argv[i]) == 0) {
-			fullscreen = true;
-		} else if(strcmp("-noflip", argv[i]) == 0) {
-			animate = false;
-		} else if(strcmp("-anykeyclose", argv[i]) == 0) {
-			anykeyclose = true;
-		} else if(strcmp("-ampm", argv[i]) == 0) {
-			twentyfourh = false;
-		} else if(strcmp("-leadingzero", argv[i]) == 0) {
-			leadingzero = true;
-		} else if(strcmp("-r", argv[i]) == 0 || strcmp("--resolution", argv[i]) == 0) {
-			char *resolution = argv[i+1];
-			char *val = strtok(resolution, "x");
-			width = atoi(val);
-			val = strtok(NULL, "x");
-			height = atoi(val);
-			i++;
-		} else if(strcmp("-w", argv[i]) == 0) {
-			width = atoi(argv[i+1]);
-			i++;
-		} else if(strcmp("-h", argv[i]) == 0) {
-			height = atoi(argv[i+1]);
-			i++;
-		} else if(strcmp("-s", argv[i]) == 0) {
-			display_scale_factor = atof(argv[i+1]);
-			i++;
-		} else if(strcmp("-window-id", argv[i]) == 0) {
-			wid = strtol(argv[i+1], (char **) NULL, 0);
-			i++;
-		} else {
-			printf("Invalid option -- %s\n", argv[i]);
-			printf("Try --help for more information.\n");
-			return 0;
-		}
-	}
-
-	/* If no window argument, check environment */
-	if(wid == 0) {
-		if ((wid_env = getenv("XSCREENSAVER_WINDOW")) != NULL ) {
-			wid = strtol(wid_env, (char **) NULL, 0); /* Base 0 autodetects hex/dec */
-		}
-	}
-
-	/* Get win attrs if we've been given a window, otherwise we'll use our own */
-	if(wid != 0) {
-		if ((display = XOpenDisplay(NULL)) != NULL) { /* Use the default display */
-			XGetWindowAttributes(display, (Window) wid, &windowAttributes);
-			XCloseDisplay(display);
-			snprintf(sdlwid, 100, "SDL_WINDOWID=0x%X", wid);
-			putenv(sdlwid); /* Tell SDL to use this window */
-			width = windowAttributes.width;
-			height = windowAttributes.height;
-		}
-	}
-
-	if(SDL_Init(SDL_INIT_VIDEO|SDL_INIT_TIMER) < 0) {
-		fprintf(stderr, "Unable to init SDL: %s\n", SDL_GetError());
-		return 1;
-	}
-	atexit(SDL_Quit);
-
-	if(fullscreen && (!wid)) {
-		screen = SDL_SetVideoMode(0, 0, 32, SDL_HWSURFACE|SDL_DOUBLEBUF|SDL_FULLSCREEN);
-	} else {
-		screen = SDL_SetVideoMode(width, height, 32, SDL_HWSURFACE|SDL_DOUBLEBUF);
-	}
-
-	if (!screen) {
-		fprintf(stderr, "Unable to set video mode: %s\n", SDL_GetError());
-		return 1;
-	}
-
-	if(fullscreen || wid) {
-		SDL_ShowCursor(SDL_DISABLE);
-	}
-
-	SDL_WM_SetCaption(TITLE, TITLE);
-
-	width = screen->w * display_scale_factor;
-	height = screen->h * display_scale_factor;
-
-	bool is_horizontal = width > height;
-
-	TTF_Init();
-	atexit(TTF_Quit);
-	font_time = TTF_OpenFont(FONT, (is_horizontal ? height : width) / 1.68 );
-	font_mode = TTF_OpenFont(FONT, (is_horizontal ? height : width) / 16.5);
-	if (!font_time || !font_mode) {
-		fprintf(stderr, "TTF_OpenFont: %s\n", TTF_GetError());
-		return 1;
-	}
-	static const char *date_font_paths[] = {
-		"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-		"/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-		"/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-		"/usr/share/fonts/truetype/freefont/FreeSans.ttf"
+static SceneWeather get_scene_weather(Uint32 ticks) {
+	static const double weather_levels[][11] = {
+		{ 0.10, 0.00, 0.00, 0.95, 0.02, 0.08, 0.00, 0.00, 255, 173, 45 },
+		{ 0.25, 0.00, 0.00, 0.72, 0.12, 0.15, 0.00, 0.00, 198, 47, 28 },
+		{ 0.78, 0.00, 0.00, 0.10, 0.20, 0.18, 0.00, 0.00, 67, 92, 116 },
+		{ 0.74, 0.36, 0.00, 0.12, 0.26, 0.34, 0.00, 0.00, 67, 112, 139 },
+		{ 0.90, 0.52, 0.00, 0.02, 0.14, 0.38, 0.00, 0.00, 54, 104, 137 },
+		{ 1.00, 0.92, 0.00, 0.00, 0.04, 0.95, 0.90, 0.00, 73, 80, 112 },
+		{ 0.72, 0.00, 0.72, 0.12, 0.24, 0.40, 0.00, 0.00, 145, 171, 192 },
+		{ 0.97, 0.00, 1.00, 0.00, 0.54, 0.88, 0.04, 0.00, 176, 197, 211 },
+		{ 0.36, 0.00, 0.12, 0.00, 0.13, 0.25, 0.00, 0.90, 62, 132, 142 },
+		{ 0.88, 0.08, 0.00, 0.15, 1.00, 0.05, 0.00, 0.00, 132, 156, 155 }
 	};
-	int date_font_size = (is_horizontal ? height : width) / 24;
-	for(size_t i = 0; i < sizeof(date_font_paths) / sizeof(date_font_paths[0]) && !font_date; i++) {
-		font_date = TTF_OpenFont(date_font_paths[i], date_font_size);
+	const Uint32 season_duration = 300000;
+	const Uint32 season_transition = 20000;
+	const Uint32 weather_duration = 65000;
+	const Uint32 weather_transition = 12000;
+	const int weather_count = sizeof(weather_levels) / sizeof(weather_levels[0]);
+	SceneWeather scene = { { 0.0, 0.0, 0.0, 0.0 },
+		0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, { 0.0, 0.0, 0.0 } };
+
+	Uint32 season_elapsed = ticks % (season_duration * 4);
+	int season = season_elapsed / season_duration;
+	Uint32 season_phase = season_elapsed % season_duration;
+	double season_blend = smooth_step(season_duration - season_transition,
+		season_duration, season_phase);
+	scene.season[season] = 1.0 - season_blend;
+	scene.season[(season + 1) % 4] = season_blend;
+
+	Uint32 weather_slot = ticks / weather_duration;
+	Uint32 current_seed = weather_slot * 2654435761u + 0x9e3779b9u;
+	Uint32 previous_seed = (weather_slot - 1) * 2246822519u + 3266489917u;
+	int current = current_seed % weather_count;
+	int previous = previous_seed % weather_count;
+	if(previous == current) {
+		previous = (previous + 1 + (current_seed >> 8) % (weather_count - 1)) % weather_count;
 	}
-	if (!font_date) {
-		fprintf(stderr, "TTF_OpenFont: %s\n", TTF_GetError());
-		return 1;
+	Uint32 weather_phase = ticks % weather_duration;
+	double weather_blend = smooth_step(0.0, weather_transition, weather_phase);
+	scene.cloud = weather_levels[previous][0]
+		+ (weather_levels[current][0] - weather_levels[previous][0]) * weather_blend;
+	scene.rain = weather_levels[previous][1]
+		+ (weather_levels[current][1] - weather_levels[previous][1]) * weather_blend;
+	scene.snow = weather_levels[previous][2]
+		+ (weather_levels[current][2] - weather_levels[previous][2]) * weather_blend;
+	scene.sunshine = weather_levels[previous][3]
+		+ (weather_levels[current][3] - weather_levels[previous][3]) * weather_blend;
+	scene.fog = weather_levels[previous][4]
+		+ (weather_levels[current][4] - weather_levels[previous][4]) * weather_blend;
+	scene.wind = weather_levels[previous][5]
+		+ (weather_levels[current][5] - weather_levels[previous][5]) * weather_blend;
+	scene.lightning = weather_levels[previous][6]
+		+ (weather_levels[current][6] - weather_levels[previous][6]) * weather_blend;
+	scene.aurora = weather_levels[previous][7]
+		+ (weather_levels[current][7] - weather_levels[previous][7]) * weather_blend;
+	for(int channel = 0; channel < 3; channel++) {
+		scene.palette[channel] = weather_levels[previous][8 + channel]
+			+ (weather_levels[current][8 + channel] - weather_levels[previous][8 + channel])
+			* weather_blend;
 	}
+	return scene;
+}
 
-	// clear screen
-	SDL_FillRect(screen, 0, SDL_MapRGB(screen->format, 0, 0, 0));
+static void render_weather_effects(SDL_Renderer *renderer, Uint32 ticks,
+	const SceneWeather *weather, int scale) {
+    // Existing weather effects...
 
-	// calculate box coordinates
-	int rectsize;
-	int spacing;
-	int radius;
-	int date_gap = TTF_FontHeight(font_date) / 2;
-
-	if (is_horizontal) {
-		rectsize = height * 0.6;
-		spacing = width * .031;
-		radius = rectsize * .0952;
-	}
-	else {
-		spacing = height * .031;
-		int max_rectsize = (height - TTF_FontHeight(font_date) - date_gap * 2 - spacing) / 2;
-		rectsize = width * 0.6 < max_rectsize ? width * 0.6 : max_rectsize;
-		radius = rectsize * .0952;
-	}
-
-	int jitter_width  = 1;
-	int jitter_height = 1;
-	if (display_scale_factor != 1) {
-		jitter_width  = (screen->w - width) * 0.5;
-		jitter_height = (screen->h - height) * 0.5;
-	}
-
-	hourBackground.w = rectsize;
-	hourBackground.h = rectsize;
-	minBackground.w = rectsize;
-	minBackground.h = rectsize;
-
-	if (is_horizontal) {
-		hourBackground.x = 0.5 * (width - (2 * rectsize) - spacing)
-										+ jitter_width;
-		hourBackground.y = (height - rectsize - date_gap - TTF_FontHeight(font_date)) / 2 + jitter_height;
-
-		minBackground.x = hourBackground.x + rectsize + spacing;
-		minBackground.y = hourBackground.y;
-		date_y = hourBackground.y + rectsize + date_gap;
-	}
-	else {
-		hourBackground.y = (height - (2 * rectsize) - spacing - date_gap - TTF_FontHeight(font_date)) / 2
-										+ jitter_height;
-		hourBackground.x = (width - rectsize) / 2 + jitter_width;
-
-		minBackground.y = hourBackground.y + rectsize + spacing;
-		minBackground.x = hourBackground.x;
-		date_y = minBackground.y + rectsize + date_gap;
-	}
-
-	// create background surface
-	bgrect.x = 0;
-	bgrect.y = 0;
-	bgrect.w = rectsize;
-	bgrect.h = rectsize;
-	bg = SDL_CreateRGBSurface(SDL_HWSURFACE|SDL_SRCALPHA, rectsize, rectsize, 32, 0xff000000, 0x00ff0000, 0x0000ff00, 0x000000ff);
-	fill_rounded_box_b(bg, &bgrect, radius, BACKGROUND_COLOR);
-
-	// draw current time
-	render_clock(20, 19);
-
-	// main loop
-	bool done = false;
-	SDL_Event event;
-	SDL_TimerID timer = SDL_AddTimer(60, update_time, NULL);
-
-	int mouse_x = -1;
-	int mouse_y = -1;
-
-	while(!done && SDL_WaitEvent(&event)) {
-		switch(event.type) {
-			case SDL_USEREVENT:
-				render_animation();
-				break;
-			case SDL_KEYDOWN:
-				if(anykeyclose){
-					done = true;
-					break;
-				}
-				switch(event.key.keysym.sym) {
-					case SDLK_ESCAPE:
-					case SDLK_q:
-						done = true;
-						break;
-					default:
-						break;
-				}
-				break;
-
-			case SDL_MOUSEMOTION:
-				if ( (mouse_x == -1) || (mouse_y == -1) ) //lifehack
-					{
-						mouse_x = event.motion.x;
-						mouse_y = event.motion.y;
-
-					}
-
-				if(((mouse_x != event.motion.x) || (mouse_y != event.motion.y)) && anykeyclose)
-					done = true;
-				break;
-
-			case SDL_QUIT:
-				done = true;
-				break;
+    // Call new visual effects after existing weather effects
+    render_meteor_shower(renderer, ticks, scale);
+    render_solar_flares(renderer, ticks, scale);
+    render_moon_phases(renderer, ticks, scale);
+    render_constellations(renderer, ticks, scale);
+    render_fireflies(renderer, ticks, scale);
+    render_ocean_waves(renderer, ticks, scale);
+    render_sandstorm(renderer, ticks, scale);
+    render_volcanic_eruption(renderer, ticks, scale);
+    render_rainbow(renderer, ticks, scale);
+    render_satellite_trails(renderer, ticks, scale);
+	if(weather->aurora > 0.01) {
+		int width, height;
+		SDL_GetRendererOutputSize(renderer, &width, &height);
+		for(int band = 0; band < 3; band++) {
+			int previous_x = 0;
+			int previous_y = height * (19 + band * 12) / 100;
+			for(int segment = 1; segment <= 24; segment++) {
+				int x = width * segment / 24;
+				double nx = (double)x / width;
+				int y = height * (19 + band * 12) / 100
+					+ (int)(sin(nx * 6.28318530718 + ticks / (1100.0 + band * 270)
+						+ band * 1.9) * scale * (0.03 + band * 0.008));
+				Uint8 alpha = (Uint8)(weather->aurora * (28 - band * 5));
+				thickLineRGBA(renderer, previous_x, previous_y, x, y, 2,
+					(Uint8)(70 + band * 24), (Uint8)(164 + band * 18),
+					(Uint8)(137 + band * 30), alpha);
+				previous_x = x;
+				previous_y = y;
+			}
 		}
 	}
 
-	SDL_RemoveTimer(timer);
-
-	SDL_FreeSurface(bg);
-	SDL_FreeSurface(screen);
-
-	TTF_CloseFont(font_time);
-	TTF_CloseFont(font_mode);
-	TTF_CloseFont(font_date);
-
-	return 0;
+	if(weather->fog > 0.01) {
+		int width, height;
+		SDL_GetRendererOutputSize(renderer, &width, &height);
+		for(int band = 0; band < 3; band++) {
+			int y = height * (57 + band * 12) / 100
+				+ (int)(sin(ticks / (2900.0 + band * 530)) * scale * 0.012);
+			int h = scale / (30 + band * 8);
+			if(h < 1) h = 1;
+			Uint8 alpha = (Uint8)(weather->fog * (21 - band * 4));
+			boxRGBA(renderer, 0, y, width - 1, y + h,
+				150, 177, 181, alpha);
+		}
+	}
+int width, height;
+		SDL_GetRendererOutputSize(renderer, &width, &height);
+		Uint32 phase = ticks % 6400;
+		double flash = 0.0;
+		if(phase < 220) flash = 1.0 - phase / 220.0;
+		else if(phase >= 390 && phase < 530) flash = 0.55 * (1.0 - (phase - 390) / 140.0);
+		if(flash > 0.0) {
+			Uint8 alpha = (Uint8)(weather->lightning * 72 * flash);
+			boxRGBA(renderer, 0, 0, width - 1, height - 1,
+				188, 205, 225, alpha);
+			unsigned int seed = ticks / 7200 * 2654435761u + 0x9e3779b9u;
+			int x = width * (18 + seed % 64) / 100;
+			int y = height * 27 / 100;
+			for(int segment = 0; segment < 7; segment++) {
+				int next_x = x + (int)((seed >> (segment % 16)) % (scale / 16 + 1))
+					- scale / 32;
+				int next_y = y + scale / 24;
+				thickLineRGBA(renderer, x, y, next_x, next_y, 2,
+					207, 220, 244, (Uint8)(alpha * 0.9));
+				if(segment == 3) {
+					thickLineRGBA(renderer)(alpha * 0.9));
+				if(segment == 3) {
+					thickLineRGBA(surface, x, y, x - scale / 30,
+						y + scale / 11, 1, 180, 203, 236, alpha);
+				}
+				x = next_x;
+				y = next_y;
+				seed = seed * 1664525u + 1013904223u;
+			}
+		}
+	}
 }
+
+static void render_constellations(SDL_Renderer *renderer, Uint32 ticks, int scale) {
+    if(!show_constellations) return;
+
+    static const struct {
+        const char *name;
+        int stars[20]; // x1,y1,x2,y2,... pairs
+    } constellations[] = {
+        {"Ursa Major", {50,20, 55,25, 55,25, 60,30, 60,30, 65,25, 65,25, 70,30}},
+        {"Orion", {30,50, 35,55, 35,55, 40,50, 40,50, 45,55, 45,55, 50,50}},
+        {"Cassiopeia", {70,30, 75,35, 75,35, 80,30, 80,30, 85,35}}
+    };
+
+    int width, height;
+    SDL_GetRendererOutputSize(renderer, &width, &height);
+
+    for(int c = 0; c < 3; c++) {
+        for(int s = 0; s < 10 && constellations[c].stars[s*2] != 0; s++) {
+            int x1 = width * constellations[c].stars[s*2] / 100;
+            int y1 = height * constellations[c].stars[s*2+1] / 100;
+            int x2 = width * constellations[c].stars[s*2+2] / 100;
+            int y2 = height * constellations[c].stars[s*2+3] / 100;
+
+            aalineRGBA(renderer, x1, y1, x2, y2, 200, 200, 255, 120);
+            filledCircleRGBA(renderer, x1, y1, 2, 255, 255, 255, 180);
+            filledCircleRGBA(renderer, x2, y2, 2, 255, 255, 255, 180);
+        }
+    }
+}
+
+static void render_fireflies(SDL_Renderer *renderer, Uint32 ticks, int scale) {
+    if(!show_fireflies) return;
+
+    const int count = 30;
+    static int positions[count][2];
+    static int speeds[count];
+    static bool initialized = false;
+
+    int width, height;
+    SDL_GetRendererOutputSize(renderer, &width, &height);
+
+    if(!initialized) {
+        for(int i = 0; i < count; i++) {
+            positions[i][0] = rand() % width;
+            positions[i][1] = height/2 + rand() % (height/2);
+            speeds[i] = 3 + rand() % 5;
+        }
+        initialized = true;
+    }
+
+    for(int i = 0; i < count; i++) {
+        // Update position
+        positions[i][0] = (positions[i][0] + speeds[i]) % width;
+
+        // Flicker effect
+        double brightness = 0.5 + 0.5 * sin(ticks/200.0 + i*100);
+
+        // Draw firefly
+        filledCircleRGBA(renderer, positions[i][0], positions[i][1],
+                        2, 255, 255, 100, (Uint8)(brightness * 200));
+    }
+}
+
+static void render_ocean_waves(SDL_Renderer *renderer, Uint32 ticks, int scale) {
+    if(!show_ocean_waves) return;
+
+    int width, height;
+    SDL_GetRendererOutputSize(renderer, &width, &height);
+
+    int horizon = height * 70 / 100;
+
+    for(int y = horizon; y < height; y++) {
+        double wave_height = 5.0 * sin(ticks/500.0 + y/20.0);
+        int wave_y = y + (int)wave_height;
+
+        Uint8 blue = 50 + (y - horizon) * 2;
+        Uint8 alpha = 100 + (height - y) * 100 / (height - horizon);
+
+        for(int x = 0; x < width; x++) {
+            if(rand() % 100 < 5) { // Sparkles
+                pixelRGBA(renderer, x, wave_y, 255, 255, 255, 150);
+            }
+        }
+        hlineRGBA(renderer, 0, width-1, wave_y, 30, 90, blue, alpha);
+    }
+}
+
+static void render_sandstorm(SDL_Renderer *renderer, Uint32 ticks, int scale) {
+    if(!show_sandstorm) return;
+
+    const int particles = 200;
+    static int positions[particles][2];
+    static bool initialized = false;
+
+    int width, height;
+    SDL_GetRendererOutputSize(renderer, &width, &height);
+
+    if(!initialized) {
+        for(int i = 0; i < particles; i++) {
+            positions[i][0] = rand() % width;
+            positions[i][1] = rand() % height;
+        }
+        initialized = true;
+    }
+
+    for(int i = 0; i < particles; i++) {
+        positions[i][0] = (positions[i][0] + 5) % width;
+        positions[i][1] = (positions[i][1] + 2) % height;
+
+        pixelRGBA(renderer, positions[i][0], positions[i][1],
+                 210, 180, 100, 120);
+    }
+}
+
+static void render_volcanic_eruption(SDL_Renderer *renderer, Uint32 ticks, int scale) {
+    if(!show_volcano) return;
+
+    const Uint32 duration = 30000;
+    Uint32 phase = ticks % duration;
+
+    if(phase < 5000 || phase > 25000) return; // Dormant periods
+
+    double intensity = (phase < 10000) ?
+        (phase - 5000) / 5000.0 :
+        (1.0 - (phase - 10000) / 15000.0);
+
+    int width, height;
+    SDL_GetRendererOutputSize(renderer, &width, &height);
+
+    // Volcano base
+    int base_x = width * 20 / 100;
+    int base_y = height * 80 / 100;
+
+    // Lava flow
+    for(int i = 0; i < 5; i++) {
+        int flow_y = base_y - i * 20;
+        int flow_width = (int)(scale * 0.1 * intensity);
+
+        boxRGBA(renderer, base_x - flow_width, flow_y,
+               base_x + flow_width, flow_y + 10,
+               255, 100 + i*20, 50, (Uint8)(intensity * 200));
+    }
+
+    // Eruption particles
+    for(int i = 0; i < 50 * intensity; i++) {
+        int part_x = base_x + (rand() % 50) - 25;
+        int part_y = base_y - (rand() % (int)(200 * intensity));
+
+        filledCircleRGBA(renderer, part_x, part_y, 2 + rand()%3,
+                        255, 150, 100, (Uint8)(intensity * 180));
+    }
+}
+
+static void render_rainbow(SDL_Renderer *renderer, Uint32 ticks, int scale) {
+    if(!show_rainbow) return;
+
+    const Uint32 duration = 60000;
+    Uint32 phase = ticks % duration;
+
+    if(phase > 30000) return; // Only show after rain
+
+    double progress = phase / 30000.0;
+
+    int width, height;
+    SDL_GetRendererOutputSize(renderer, &width, &height);
+
+    int center_x = width / 2;
+    int center_y = height + scale * 0.3;
+
+    const Uint8 colors[7][3] = {
+        {255, 0, 0}, {255, 127, 0}, {255, 255, 0},
+        {0, 255, 0}, {0, 0, 255}, {75, 0, 130}, {148, 0, 211}
+    };
+
+    for(int i = 0; i < 7; i++) {
+        int radius = scale * (0.5 + i * 0.05);
+
+        // Draw rainbow using multiple arcs
+        for(int angle = 180; angle < 360; angle += 5) {
+            aacircleRGBA(renderer, center_x, center_y, radius,
+                       colors[i][0], colors[i][1], colors[i][2],
+                       (Uint8)((1.0 - progress) * 200));
+        }
+    }
+}
+
+static void render_satellite_trails(SDL_Renderer *renderer, Uint32 ticks, int scale) {
+    if(!show_satellites) return;
+
+    const int count = 3;
+    snt width, height;
+    SDL_GetRendererOutputSize(renderer, &width, &height);
+
+    if(!initialized) {
+        for(int i = 0; i < count; i++) {
+            positions[i][0] = rand() % width;
+            positions[i][1] = rand() % (height/3);
+            speeds[i] = 1 + rand() % 3;
+        }
+        initialized = true;
+    }
+
+    for(int i = 0; i < count; i++) {
+        positions[i][0] = (positions[i][0] + speeds[i]) % width;
+
+        // Draw trail
+        for(int j = 0; j < 5; j++) {
+            int trail_x = (positions[i][0] - j * speeds[i] + width) % width;
+            int trail_y = positions[i][1] + j * 2;
+
+            if(trail_y < height) {
+                pixelRGBA(rendererons[i][0] - j * speeds[i] + surface->w) % surface->w;
+            int trail_y = positions[i][1] + j * 2;
+
+            if(trail_y < surface->h) {
+                pixelRGBA(surface, trail_x, trail_y,
+                         150, 150, 255, 100 - j*20);
+            }
+        }
+    }
+}
+
